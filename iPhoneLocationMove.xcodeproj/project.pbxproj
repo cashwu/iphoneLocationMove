@@ -1,0 +1,765 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		122F228494002D4F87F549CC /* AppShellTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 229985E2E69AB9F9000ECA8F /* AppShellTests.swift */; };
+		1469CA4058F04BCA0CE4FBC9 /* SimulationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65A30ED66C9BD109DD42804C /* SimulationStore.swift */; };
+		169D4AE07957A433FE9F7492 /* DeviceRecoveryCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 274A64B3475B34DF78AFE12A /* DeviceRecoveryCoordinator.swift */; };
+		19AC3A665BDBB19D26A02030 /* GeneratedTunnelTrustAnchor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AED1B8A93BFB94307B16E22 /* GeneratedTunnelTrustAnchor.swift */; };
+		1ED1F71B53DF0CFE152AFC55 /* iPhoneLocationMoveApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B47024B88A1CC74782D38DE /* iPhoneLocationMoveApp.swift */; };
+		1F872BCB56A6CC3813B1BFE1 /* PymobiledeviceAdapterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6509171DA5C07B771324165 /* PymobiledeviceAdapterTests.swift */; };
+		24CA7061E4936613525A7258 /* PymobiledeviceAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 781B9BFF8EEAAC060602FCD9 /* PymobiledeviceAdapter.swift */; };
+		2A86F130158D0A644255AA70 /* DeviceLocationClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CDBBA81AE3E6BE73470D85C /* DeviceLocationClientTests.swift */; };
+		2E811F185371ABA4502333D8 /* SystemSleepObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = C33C39B75F30F97C5FD87F97 /* SystemSleepObserver.swift */; };
+		32057B506FAED21F44D7666F /* LocationMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE6718254E74C698E2F36E02 /* LocationMapView.swift */; };
+		35A8358607153D109DA461C7 /* RouteSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11C88E4D0E82125D49725F3 /* RouteSessionTests.swift */; };
+		4C99660E7896E0D08F3BE432 /* RuntimeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EE0A623E7C45A8C947ABAE8 /* RuntimeManager.swift */; };
+		4E1F90F4B7D0984FC285143F /* TunnelHelperContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 400EE4D384C988AEFE71B639 /* TunnelHelperContractTests.swift */; };
+		53CFAD6ACEDE2EE082F83BE1 /* AppLifecycleCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 900C1DF2377C49650214DA8B /* AppLifecycleCoordinator.swift */; };
+		6F94C46D9D51C7505BA5EF1B /* DeviceSetupStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B633D730DAB0504455DEA1D /* DeviceSetupStoreTests.swift */; };
+		71E36A49BE8A400F2855BF60 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB69C7AAD16E62538F94CB84 /* main.swift */; };
+		916E46C74485E04A6670327F /* RiskNoticeStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE6895E5CE97D10ED6E02DB1 /* RiskNoticeStoreTests.swift */; };
+		91C8AD0E715CCE757A0292E8 /* DeviceSetupStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CD79CFBC78C06B97BB75FA7 /* DeviceSetupStore.swift */; };
+		9549D93BC16256FAF2047C7B /* RiskNoticeStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71BC154167BB4FBC11520A20 /* RiskNoticeStore.swift */; };
+		9820BCC9AEB9EBA61B00ACAC /* com.cash.iPhoneLocationMoveTunnelHelper in Embed Dependencies */ = {isa = PBXBuildFile; fileRef = 6214D37A3E0BBB27728394A0 /* com.cash.iPhoneLocationMoveTunnelHelper */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		982DE973EB38C9B35ECCBF60 /* TunnelXPCInterfaceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C949097E4B2497F02969D6E /* TunnelXPCInterfaceTests.swift */; };
+		A5CC7596CF305F519D458A27 /* DeviceFailurePresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0F938399DFC8422804B8D35 /* DeviceFailurePresentationTests.swift */; };
+		A5F2A55593778AFD042F1A85 /* tunnel-wheelhouse in Resources */ = {isa = PBXBuildFile; fileRef = C8C4ECB67326C161E706128F /* tunnel-wheelhouse */; };
+		A6E3AC8C343979214018378E /* DeviceLocationClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72A0E5881085DB7B1C63F12B /* DeviceLocationClient.swift */; };
+		AACFEFE0B35594A274809A25 /* helper.py in Resources */ = {isa = PBXBuildFile; fileRef = D8BA53EE3A34DE7EDA38BD17 /* helper.py */; };
+		B9C08CE6E544F465DE98CE40 /* LocationMapModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B12E4A8F3296E1234B086F0 /* LocationMapModelTests.swift */; };
+		C3102FD1AF4B1E7F759ED3B8 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8E777568830D696D1D18D0D /* ContentView.swift */; };
+		CAEB1F692BECCCE41023D6D5 /* RuntimeManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3F827030D0A13106F2B46DB /* RuntimeManagerTests.swift */; };
+		DAA5D5A513D88CEF3CF17411 /* DisconnectReconnectIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D85D42D9742C16E282411906 /* DisconnectReconnectIntegrationTests.swift */; };
+		DE6187A6A0C69C354BA935AC /* AppLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88BE49BA668D9D29110B9B5B /* AppLifecycleTests.swift */; };
+		DFB9B81C0AE47F3A9F49D44D /* pymobiledevice3.lock in Resources */ = {isa = PBXBuildFile; fileRef = 1C7D8072741EFD7D6A681120 /* pymobiledevice3.lock */; };
+		E9BD747E6111212036A7050B /* SimulationStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE974F5BA84AC3545A35AB0A /* SimulationStoreTests.swift */; };
+		F2624FF8CA05E230AF36CD2F /* LocationMapModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08D191987B2ADAA379934BC0 /* LocationMapModel.swift */; };
+		F5CA6726AC966325AAD94351 /* RouteSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = E14BE7BA1C7381D37283EAE3 /* RouteSession.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		2CAE188E2E9E3718E2BB933E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 2147BEEA8CF44E905D1E36BD /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 58424766B681329BC1A55C47;
+			remoteInfo = iPhoneLocationMoveTunnelHelper;
+		};
+		37982BCF6D8283851ADE43DA /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 2147BEEA8CF44E905D1E36BD /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B92D5DB476CEB477D8408079;
+			remoteInfo = iPhoneLocationMove;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		C1B5A4F92711A581E0025162 /* Embed Dependencies */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = Contents/Library/LaunchServices;
+			dstSubfolderSpec = 1;
+			files = (
+				9820BCC9AEB9EBA61B00ACAC /* com.cash.iPhoneLocationMoveTunnelHelper in Embed Dependencies */,
+			);
+			name = "Embed Dependencies";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		08D191987B2ADAA379934BC0 /* LocationMapModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationMapModel.swift; sourceTree = "<group>"; };
+		0C949097E4B2497F02969D6E /* TunnelXPCInterfaceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelXPCInterfaceTests.swift; sourceTree = "<group>"; };
+		1B47024B88A1CC74782D38DE /* iPhoneLocationMoveApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = iPhoneLocationMoveApp.swift; sourceTree = "<group>"; };
+		1C7D8072741EFD7D6A681120 /* pymobiledevice3.lock */ = {isa = PBXFileReference; lastKnownFileType = text; path = pymobiledevice3.lock; sourceTree = "<group>"; };
+		1CDBBA81AE3E6BE73470D85C /* DeviceLocationClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceLocationClientTests.swift; sourceTree = "<group>"; };
+		1FF84545CFAC4FFBE2C11957 /* iPhoneLocationMove-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "iPhoneLocationMove-Bridging-Header.h"; sourceTree = "<group>"; };
+		229985E2E69AB9F9000ECA8F /* AppShellTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppShellTests.swift; sourceTree = "<group>"; };
+		274A64B3475B34DF78AFE12A /* DeviceRecoveryCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceRecoveryCoordinator.swift; sourceTree = "<group>"; };
+		2CD79CFBC78C06B97BB75FA7 /* DeviceSetupStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceSetupStore.swift; sourceTree = "<group>"; };
+		400EE4D384C988AEFE71B639 /* TunnelHelperContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelHelperContractTests.swift; sourceTree = "<group>"; };
+		4B12E4A8F3296E1234B086F0 /* LocationMapModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationMapModelTests.swift; sourceTree = "<group>"; };
+		5AED1B8A93BFB94307B16E22 /* GeneratedTunnelTrustAnchor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneratedTunnelTrustAnchor.swift; sourceTree = "<group>"; };
+		6214D37A3E0BBB27728394A0 /* com.cash.iPhoneLocationMoveTunnelHelper */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = com.cash.iPhoneLocationMoveTunnelHelper; sourceTree = BUILT_PRODUCTS_DIR; };
+		65A30ED66C9BD109DD42804C /* SimulationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulationStore.swift; sourceTree = "<group>"; };
+		6A537C1CD7AE9E57CC726531 /* iPhoneLocationMove.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = iPhoneLocationMove.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		6B633D730DAB0504455DEA1D /* DeviceSetupStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceSetupStoreTests.swift; sourceTree = "<group>"; };
+		71BC154167BB4FBC11520A20 /* RiskNoticeStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RiskNoticeStore.swift; sourceTree = "<group>"; };
+		72A0E5881085DB7B1C63F12B /* DeviceLocationClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceLocationClient.swift; sourceTree = "<group>"; };
+		781B9BFF8EEAAC060602FCD9 /* PymobiledeviceAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PymobiledeviceAdapter.swift; sourceTree = "<group>"; };
+		88BE49BA668D9D29110B9B5B /* AppLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLifecycleTests.swift; sourceTree = "<group>"; };
+		900C1DF2377C49650214DA8B /* AppLifecycleCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLifecycleCoordinator.swift; sourceTree = "<group>"; };
+		9EE0A623E7C45A8C947ABAE8 /* RuntimeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeManager.swift; sourceTree = "<group>"; };
+		A6BF3FD09110176BFB326BDC /* TunnelHelperXPCProtocol.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = TunnelHelperXPCProtocol.h; sourceTree = "<group>"; };
+		B3F827030D0A13106F2B46DB /* RuntimeManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeManagerTests.swift; sourceTree = "<group>"; };
+		B48F51966D122D5A7328F9BE /* iPhoneLocationMoveTunnelHelper-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "iPhoneLocationMoveTunnelHelper-Bridging-Header.h"; sourceTree = "<group>"; };
+		B8E777568830D696D1D18D0D /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		BE974F5BA84AC3545A35AB0A /* SimulationStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulationStoreTests.swift; sourceTree = "<group>"; };
+		C33C39B75F30F97C5FD87F97 /* SystemSleepObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemSleepObserver.swift; sourceTree = "<group>"; };
+		C8C4ECB67326C161E706128F /* tunnel-wheelhouse */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "tunnel-wheelhouse"; path = "iPhoneLocationMoveTunnelHelper/Resources/tunnel-wheelhouse"; sourceTree = SOURCE_ROOT; };
+		D6509171DA5C07B771324165 /* PymobiledeviceAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PymobiledeviceAdapterTests.swift; sourceTree = "<group>"; };
+		D85D42D9742C16E282411906 /* DisconnectReconnectIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisconnectReconnectIntegrationTests.swift; sourceTree = "<group>"; };
+		D8BA53EE3A34DE7EDA38BD17 /* helper.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = helper.py; sourceTree = "<group>"; };
+		DB69C7AAD16E62538F94CB84 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		E14BE7BA1C7381D37283EAE3 /* RouteSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteSession.swift; sourceTree = "<group>"; };
+		E73901138E8F5E713591376A /* iPhoneLocationMoveTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = iPhoneLocationMoveTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		EE6718254E74C698E2F36E02 /* LocationMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationMapView.swift; sourceTree = "<group>"; };
+		EE6895E5CE97D10ED6E02DB1 /* RiskNoticeStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RiskNoticeStoreTests.swift; sourceTree = "<group>"; };
+		F0F938399DFC8422804B8D35 /* DeviceFailurePresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceFailurePresentationTests.swift; sourceTree = "<group>"; };
+		F11C88E4D0E82125D49725F3 /* RouteSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteSessionTests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		149EBF542114D540CEEC4DB0 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				C8C4ECB67326C161E706128F /* tunnel-wheelhouse */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		2358E1F61E09AA83FB88F663 /* Simulation */ = {
+			isa = PBXGroup;
+			children = (
+				65A30ED66C9BD109DD42804C /* SimulationStore.swift */,
+			);
+			path = Simulation;
+			sourceTree = "<group>";
+		};
+		2AF20DB43CBB6E11580D6723 /* Features */ = {
+			isa = PBXGroup;
+			children = (
+				E1EF507D21DD54F51E178401 /* Map */,
+				402B5DA1F4B7508D4686BC1D /* Setup */,
+				2358E1F61E09AA83FB88F663 /* Simulation */,
+			);
+			path = Features;
+			sourceTree = "<group>";
+		};
+		402B5DA1F4B7508D4686BC1D /* Setup */ = {
+			isa = PBXGroup;
+			children = (
+				2CD79CFBC78C06B97BB75FA7 /* DeviceSetupStore.swift */,
+			);
+			path = Setup;
+			sourceTree = "<group>";
+		};
+		45C7EBB1186F2C84DB3DF1CA /* iPhoneLocationMoveTunnelHelper */ = {
+			isa = PBXGroup;
+			children = (
+				5AED1B8A93BFB94307B16E22 /* GeneratedTunnelTrustAnchor.swift */,
+				B48F51966D122D5A7328F9BE /* iPhoneLocationMoveTunnelHelper-Bridging-Header.h */,
+				DB69C7AAD16E62538F94CB84 /* main.swift */,
+				149EBF542114D540CEEC4DB0 /* Resources */,
+			);
+			path = iPhoneLocationMoveTunnelHelper;
+			sourceTree = "<group>";
+		};
+		56B9B1C4E206A1940AA2D727 /* Device */ = {
+			isa = PBXGroup;
+			children = (
+				72A0E5881085DB7B1C63F12B /* DeviceLocationClient.swift */,
+				274A64B3475B34DF78AFE12A /* DeviceRecoveryCoordinator.swift */,
+				781B9BFF8EEAAC060602FCD9 /* PymobiledeviceAdapter.swift */,
+				9EE0A623E7C45A8C947ABAE8 /* RuntimeManager.swift */,
+				A6BF3FD09110176BFB326BDC /* TunnelHelperXPCProtocol.h */,
+				D146BF993B17CC759A2B38BF /* Resources */,
+			);
+			path = Device;
+			sourceTree = "<group>";
+		};
+		5D676072085B007962D6C778 /* Domain */ = {
+			isa = PBXGroup;
+			children = (
+				E14BE7BA1C7381D37283EAE3 /* RouteSession.swift */,
+			);
+			path = Domain;
+			sourceTree = "<group>";
+		};
+		60D0D0E2727CF0E9E8B71ED3 /* iPhoneLocationMoveTests */ = {
+			isa = PBXGroup;
+			children = (
+				88BE49BA668D9D29110B9B5B /* AppLifecycleTests.swift */,
+				229985E2E69AB9F9000ECA8F /* AppShellTests.swift */,
+				F0F938399DFC8422804B8D35 /* DeviceFailurePresentationTests.swift */,
+				1CDBBA81AE3E6BE73470D85C /* DeviceLocationClientTests.swift */,
+				6B633D730DAB0504455DEA1D /* DeviceSetupStoreTests.swift */,
+				D85D42D9742C16E282411906 /* DisconnectReconnectIntegrationTests.swift */,
+				4B12E4A8F3296E1234B086F0 /* LocationMapModelTests.swift */,
+				D6509171DA5C07B771324165 /* PymobiledeviceAdapterTests.swift */,
+				EE6895E5CE97D10ED6E02DB1 /* RiskNoticeStoreTests.swift */,
+				F11C88E4D0E82125D49725F3 /* RouteSessionTests.swift */,
+				B3F827030D0A13106F2B46DB /* RuntimeManagerTests.swift */,
+				BE974F5BA84AC3545A35AB0A /* SimulationStoreTests.swift */,
+				400EE4D384C988AEFE71B639 /* TunnelHelperContractTests.swift */,
+				0C949097E4B2497F02969D6E /* TunnelXPCInterfaceTests.swift */,
+			);
+			path = iPhoneLocationMoveTests;
+			sourceTree = "<group>";
+		};
+		69A2C1C9DE3E58A017F87DA2 /* iPhoneLocationMoveHelper */ = {
+			isa = PBXGroup;
+			children = (
+				D8BA53EE3A34DE7EDA38BD17 /* helper.py */,
+			);
+			path = iPhoneLocationMoveHelper;
+			sourceTree = "<group>";
+		};
+		833C8DB33DC8BF6E95D42628 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				6A537C1CD7AE9E57CC726531 /* iPhoneLocationMove.app */,
+				E73901138E8F5E713591376A /* iPhoneLocationMoveTests.xctest */,
+				6214D37A3E0BBB27728394A0 /* com.cash.iPhoneLocationMoveTunnelHelper */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		8B8D3422509ABA223119CA83 /* iPhoneLocationMove */ = {
+			isa = PBXGroup;
+			children = (
+				B8E777568830D696D1D18D0D /* ContentView.swift */,
+				1FF84545CFAC4FFBE2C11957 /* iPhoneLocationMove-Bridging-Header.h */,
+				DCA09C01A5456C2315754B79 /* App */,
+				56B9B1C4E206A1940AA2D727 /* Device */,
+				5D676072085B007962D6C778 /* Domain */,
+				2AF20DB43CBB6E11580D6723 /* Features */,
+			);
+			path = iPhoneLocationMove;
+			sourceTree = "<group>";
+		};
+		D146BF993B17CC759A2B38BF /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				1C7D8072741EFD7D6A681120 /* pymobiledevice3.lock */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		DCA09C01A5456C2315754B79 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				900C1DF2377C49650214DA8B /* AppLifecycleCoordinator.swift */,
+				1B47024B88A1CC74782D38DE /* iPhoneLocationMoveApp.swift */,
+				71BC154167BB4FBC11520A20 /* RiskNoticeStore.swift */,
+				C33C39B75F30F97C5FD87F97 /* SystemSleepObserver.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		E1EF507D21DD54F51E178401 /* Map */ = {
+			isa = PBXGroup;
+			children = (
+				08D191987B2ADAA379934BC0 /* LocationMapModel.swift */,
+				EE6718254E74C698E2F36E02 /* LocationMapView.swift */,
+			);
+			path = Map;
+			sourceTree = "<group>";
+		};
+		E6AB63DD497F17BF1BEE1D77 = {
+			isa = PBXGroup;
+			children = (
+				8B8D3422509ABA223119CA83 /* iPhoneLocationMove */,
+				69A2C1C9DE3E58A017F87DA2 /* iPhoneLocationMoveHelper */,
+				60D0D0E2727CF0E9E8B71ED3 /* iPhoneLocationMoveTests */,
+				45C7EBB1186F2C84DB3DF1CA /* iPhoneLocationMoveTunnelHelper */,
+				833C8DB33DC8BF6E95D42628 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		2E6A871B7E6FE7E2569276E9 /* iPhoneLocationMoveTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FAC070958479E58C78F9BBD9 /* Build configuration list for PBXNativeTarget "iPhoneLocationMoveTests" */;
+			buildPhases = (
+				FCE5015C29CAD4AB797548A7 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D12A7BF4B354DFAE42787F07 /* PBXTargetDependency */,
+			);
+			name = iPhoneLocationMoveTests;
+			packageProductDependencies = (
+			);
+			productName = iPhoneLocationMoveTests;
+			productReference = E73901138E8F5E713591376A /* iPhoneLocationMoveTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		58424766B681329BC1A55C47 /* iPhoneLocationMoveTunnelHelper */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 2D7B9D50BC0C332C7971AAB8 /* Build configuration list for PBXNativeTarget "iPhoneLocationMoveTunnelHelper" */;
+			buildPhases = (
+				758838DC25C2145B0FACBFAC /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = iPhoneLocationMoveTunnelHelper;
+			packageProductDependencies = (
+			);
+			productName = iPhoneLocationMoveTunnelHelper;
+			productReference = 6214D37A3E0BBB27728394A0 /* com.cash.iPhoneLocationMoveTunnelHelper */;
+			productType = "com.apple.product-type.tool";
+		};
+		B92D5DB476CEB477D8408079 /* iPhoneLocationMove */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 6EC5D9829BF8DA74942D83A8 /* Build configuration list for PBXNativeTarget "iPhoneLocationMove" */;
+			buildPhases = (
+				5BFE6D8BA066DEE4A9BB8EC0 /* Sources */,
+				24D5E9A17924629B37077F96 /* Resources */,
+				C1B5A4F92711A581E0025162 /* Embed Dependencies */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				05A01D046ED2C0DD0B7B78EE /* PBXTargetDependency */,
+			);
+			name = iPhoneLocationMove;
+			packageProductDependencies = (
+			);
+			productName = iPhoneLocationMove;
+			productReference = 6A537C1CD7AE9E57CC726531 /* iPhoneLocationMove.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		2147BEEA8CF44E905D1E36BD /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2660;
+				TargetAttributes = {
+					2E6A871B7E6FE7E2569276E9 = {
+						DevelopmentTeam = 2LRM76M575;
+						ProvisioningStyle = Automatic;
+					};
+					58424766B681329BC1A55C47 = {
+						DevelopmentTeam = 2LRM76M575;
+						ProvisioningStyle = Automatic;
+					};
+					B92D5DB476CEB477D8408079 = {
+						DevelopmentTeam = 2LRM76M575;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = A33A8BF38D47C84D55ED0981 /* Build configuration list for PBXProject "iPhoneLocationMove" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = E6AB63DD497F17BF1BEE1D77;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 833C8DB33DC8BF6E95D42628 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				B92D5DB476CEB477D8408079 /* iPhoneLocationMove */,
+				2E6A871B7E6FE7E2569276E9 /* iPhoneLocationMoveTests */,
+				58424766B681329BC1A55C47 /* iPhoneLocationMoveTunnelHelper */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		24D5E9A17924629B37077F96 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AACFEFE0B35594A274809A25 /* helper.py in Resources */,
+				DFB9B81C0AE47F3A9F49D44D /* pymobiledevice3.lock in Resources */,
+				A5F2A55593778AFD042F1A85 /* tunnel-wheelhouse in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		5BFE6D8BA066DEE4A9BB8EC0 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				53CFAD6ACEDE2EE082F83BE1 /* AppLifecycleCoordinator.swift in Sources */,
+				C3102FD1AF4B1E7F759ED3B8 /* ContentView.swift in Sources */,
+				A6E3AC8C343979214018378E /* DeviceLocationClient.swift in Sources */,
+				169D4AE07957A433FE9F7492 /* DeviceRecoveryCoordinator.swift in Sources */,
+				91C8AD0E715CCE757A0292E8 /* DeviceSetupStore.swift in Sources */,
+				F2624FF8CA05E230AF36CD2F /* LocationMapModel.swift in Sources */,
+				32057B506FAED21F44D7666F /* LocationMapView.swift in Sources */,
+				24CA7061E4936613525A7258 /* PymobiledeviceAdapter.swift in Sources */,
+				9549D93BC16256FAF2047C7B /* RiskNoticeStore.swift in Sources */,
+				F5CA6726AC966325AAD94351 /* RouteSession.swift in Sources */,
+				4C99660E7896E0D08F3BE432 /* RuntimeManager.swift in Sources */,
+				1469CA4058F04BCA0CE4FBC9 /* SimulationStore.swift in Sources */,
+				2E811F185371ABA4502333D8 /* SystemSleepObserver.swift in Sources */,
+				1ED1F71B53DF0CFE152AFC55 /* iPhoneLocationMoveApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		758838DC25C2145B0FACBFAC /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				19AC3A665BDBB19D26A02030 /* GeneratedTunnelTrustAnchor.swift in Sources */,
+				71E36A49BE8A400F2855BF60 /* main.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FCE5015C29CAD4AB797548A7 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DE6187A6A0C69C354BA935AC /* AppLifecycleTests.swift in Sources */,
+				122F228494002D4F87F549CC /* AppShellTests.swift in Sources */,
+				A5CC7596CF305F519D458A27 /* DeviceFailurePresentationTests.swift in Sources */,
+				2A86F130158D0A644255AA70 /* DeviceLocationClientTests.swift in Sources */,
+				6F94C46D9D51C7505BA5EF1B /* DeviceSetupStoreTests.swift in Sources */,
+				DAA5D5A513D88CEF3CF17411 /* DisconnectReconnectIntegrationTests.swift in Sources */,
+				B9C08CE6E544F465DE98CE40 /* LocationMapModelTests.swift in Sources */,
+				1F872BCB56A6CC3813B1BFE1 /* PymobiledeviceAdapterTests.swift in Sources */,
+				916E46C74485E04A6670327F /* RiskNoticeStoreTests.swift in Sources */,
+				35A8358607153D109DA461C7 /* RouteSessionTests.swift in Sources */,
+				CAEB1F692BECCCE41023D6D5 /* RuntimeManagerTests.swift in Sources */,
+				E9BD747E6111212036A7050B /* SimulationStoreTests.swift in Sources */,
+				4E1F90F4B7D0984FC285143F /* TunnelHelperContractTests.swift in Sources */,
+				982DE973EB38C9B35ECCBF60 /* TunnelXPCInterfaceTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		05A01D046ED2C0DD0B7B78EE /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 58424766B681329BC1A55C47 /* iPhoneLocationMoveTunnelHelper */;
+			targetProxy = 2CAE188E2E9E3718E2BB933E /* PBXContainerItemProxy */;
+		};
+		D12A7BF4B354DFAE42787F07 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B92D5DB476CEB477D8408079 /* iPhoneLocationMove */;
+			targetProxy = 37982BCF6D8283851ADE43DA /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		0F435EBB212EE71D194B7D96 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.cash.iPhoneLocationMoveTests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/iPhoneLocationMove.app/Contents/MacOS/iPhoneLocationMove";
+			};
+			name = Debug;
+		};
+		2791D9E236B0D04FF46D0912 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 2LRM76M575;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		594C08C164C819E735F75B9A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.cash.iPhoneLocationMoveTests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/iPhoneLocationMove.app/Contents/MacOS/iPhoneLocationMove";
+			};
+			name = Release;
+		};
+		5EBBEE7BE75C3AFACB893A3D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = iPhoneLocationMoveTunnelHelper/iPhoneLocationMoveTunnelHelper.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"-sectcreate",
+					__TEXT,
+					__info_plist,
+					"$(SRCROOT)/iPhoneLocationMoveTunnelHelper/HelperInfo.plist",
+					"-sectcreate",
+					__TEXT,
+					__launchd_plist,
+					"$(SRCROOT)/iPhoneLocationMoveTunnelHelper/Launchd.plist",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.cash.iPhoneLocationMoveTunnelHelper;
+				PRODUCT_NAME = com.cash.iPhoneLocationMoveTunnelHelper;
+				SDKROOT = macosx;
+				SWIFT_OBJC_BRIDGING_HEADER = "iPhoneLocationMoveTunnelHelper/iPhoneLocationMoveTunnelHelper-Bridging-Header.h";
+			};
+			name = Debug;
+		};
+		60DE75C00360533A11C54665 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = iPhoneLocationMove/iPhoneLocationMove.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = iPhoneLocationMove/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.cash.iPhoneLocationMove;
+				PRODUCT_NAME = iPhoneLocationMove;
+				SDKROOT = macosx;
+				SWIFT_OBJC_BRIDGING_HEADER = "iPhoneLocationMove/iPhoneLocationMove-Bridging-Header.h";
+			};
+			name = Debug;
+		};
+		697BA7357BDA85C0206DF816 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = iPhoneLocationMove/iPhoneLocationMove.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = iPhoneLocationMove/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.cash.iPhoneLocationMove;
+				PRODUCT_NAME = iPhoneLocationMove;
+				SDKROOT = macosx;
+				SWIFT_OBJC_BRIDGING_HEADER = "iPhoneLocationMove/iPhoneLocationMove-Bridging-Header.h";
+			};
+			name = Release;
+		};
+		988E3B2B5407716008E4BC17 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 2LRM76M575;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		FA2A9F5B6567E92A5CF696B0 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = iPhoneLocationMoveTunnelHelper/iPhoneLocationMoveTunnelHelper.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"-sectcreate",
+					__TEXT,
+					__info_plist,
+					"$(SRCROOT)/iPhoneLocationMoveTunnelHelper/HelperInfo.plist",
+					"-sectcreate",
+					__TEXT,
+					__launchd_plist,
+					"$(SRCROOT)/iPhoneLocationMoveTunnelHelper/Launchd.plist",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.cash.iPhoneLocationMoveTunnelHelper;
+				PRODUCT_NAME = com.cash.iPhoneLocationMoveTunnelHelper;
+				SDKROOT = macosx;
+				SWIFT_OBJC_BRIDGING_HEADER = "iPhoneLocationMoveTunnelHelper/iPhoneLocationMoveTunnelHelper-Bridging-Header.h";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		2D7B9D50BC0C332C7971AAB8 /* Build configuration list for PBXNativeTarget "iPhoneLocationMoveTunnelHelper" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5EBBEE7BE75C3AFACB893A3D /* Debug */,
+				FA2A9F5B6567E92A5CF696B0 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		6EC5D9829BF8DA74942D83A8 /* Build configuration list for PBXNativeTarget "iPhoneLocationMove" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				60DE75C00360533A11C54665 /* Debug */,
+				697BA7357BDA85C0206DF816 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A33A8BF38D47C84D55ED0981 /* Build configuration list for PBXProject "iPhoneLocationMove" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				988E3B2B5407716008E4BC17 /* Debug */,
+				2791D9E236B0D04FF46D0912 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FAC070958479E58C78F9BBD9 /* Build configuration list for PBXNativeTarget "iPhoneLocationMoveTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0F435EBB212EE71D194B7D96 /* Debug */,
+				594C08C164C819E735F75B9A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 2147BEEA8CF44E905D1E36BD /* Project object */;
+}

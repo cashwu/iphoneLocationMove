@@ -1,0 +1,93 @@
+name: iPhoneLocationMove
+options:
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    DEVELOPMENT_TEAM: 2LRM76M575
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: Apple Development
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+targets:
+  iPhoneLocationMove:
+    type: application
+    platform: macOS
+    sources:
+      - path: iPhoneLocationMove
+        excludes:
+          - project.yml
+          - Info.plist
+          - iPhoneLocationMove.entitlements
+      - path: iPhoneLocationMoveTunnelHelper/Resources/tunnel-wheelhouse
+        type: folder
+        buildPhase: resources
+      - path: iPhoneLocationMoveHelper/helper.py
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cash.iPhoneLocationMove
+        PRODUCT_NAME: iPhoneLocationMove
+        GENERATE_INFOPLIST_FILE: false
+        INFOPLIST_FILE: iPhoneLocationMove/Info.plist
+        CODE_SIGN_ENTITLEMENTS: iPhoneLocationMove/iPhoneLocationMove.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: iPhoneLocationMove/iPhoneLocationMove-Bridging-Header.h
+    dependencies:
+      - target: iPhoneLocationMoveTunnelHelper
+        embed: true
+        link: false
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Library/LaunchServices
+  iPhoneLocationMoveTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: iPhoneLocationMoveTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cash.iPhoneLocationMoveTests
+        GENERATE_INFOPLIST_FILE: true
+        CODE_SIGNING_ALLOWED: false
+    dependencies:
+      - target: iPhoneLocationMove
+  iPhoneLocationMoveTunnelHelper:
+    type: tool
+    platform: macOS
+    sources:
+      - path: iPhoneLocationMoveTunnelHelper
+        excludes:
+          - iPhoneLocationMoveTunnelHelper.entitlements
+          - HelperInfo.plist
+          - Launchd.plist
+          - Resources
+          - Scripts
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cash.iPhoneLocationMoveTunnelHelper
+        PRODUCT_NAME: com.cash.iPhoneLocationMoveTunnelHelper
+        CODE_SIGN_ENTITLEMENTS: iPhoneLocationMoveTunnelHelper/iPhoneLocationMoveTunnelHelper.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: iPhoneLocationMoveTunnelHelper/iPhoneLocationMoveTunnelHelper-Bridging-Header.h
+        OTHER_LDFLAGS:
+          - -sectcreate
+          - __TEXT
+          - __info_plist
+          - $(SRCROOT)/iPhoneLocationMoveTunnelHelper/HelperInfo.plist
+          - -sectcreate
+          - __TEXT
+          - __launchd_plist
+          - $(SRCROOT)/iPhoneLocationMoveTunnelHelper/Launchd.plist
+schemes:
+  iPhoneLocationMove:
+    build:
+      targets:
+        iPhoneLocationMove: all
+        iPhoneLocationMoveTests:
+          - test
+        iPhoneLocationMoveTunnelHelper: all
+    test:
+      gatherCoverageData: true
+      targets:
+        - name: iPhoneLocationMoveTests
