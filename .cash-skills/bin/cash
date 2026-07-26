@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import json
+import os
+import stat
+import subprocess
+import sys
+
+
+MUTATING_FAMILIES = {
+    "new",
+    "task",
+    "in-progress",
+    "touched",
+    "park",
+    "unpark",
+    "sync",
+    "archive",
+}
+SKILL_PATHS = tuple(
+    f"{variant}/skills/cash-{skill}/SKILL.md"
+    for variant in (".agents", ".claude")
+    for skill in (
+        "analyze",
+        "apply",
+        "archive",
+        "ask",
+        "audit",
+        "commit",
+        "debug",
+        "discuss",
+        "drift",
+        "ingest",
+        "propose",
+        "verify",
+    )
+)
+FAILURE_HINT = ""
+
+
+def fail(code: str, message: str) -> None:
+    if FAILURE_HINT:
+        message = f"{message}. {FAILURE_HINT}"
+    if "--json" in sys.argv[1:]:
+        sys.stdout.write(
+            json.dumps(
+                {"error": {"code": code, "message": message}},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+    else:
+        sys.stderr.write(f"error[{code}]: {message}\n")
+    raise SystemExit(1)
+
+
+def open_regular(path: str, expected_mode: int) -> tuple[int, os.stat_result]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        named = os.lstat(path)
+    except OSError as error:
+        fail("bootstrap_invalid", f"{path}: {error}")
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_nlink != 1
+        or stat.S_IMODE(opened.st_mode) != expected_mode
+        or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+    ):
+        os.close(descriptor)
+        fail("bootstrap_invalid", f"{path}: unsafe identity or mode")
+    return descriptor, opened
+
+
+def sha256_file(path: str) -> str:
+    descriptor, _ = open_regular(path, stat.S_IMODE(os.lstat(path).st_mode))
+    digest = hashlib.sha256()
+    try:
+        while chunk := os.read(descriptor, 131072):
+            digest.update(chunk)
+    finally:
+        os.close(descriptor)
+    return digest.hexdigest()
+
+
+def is_source_layout(project_root: str) -> bool:
+    required = {
+        "install-cash-skills.fish": 0o755,
+        "cash-skills.version": 0o644,
+        ".cash.yaml": 0o644,
+        "openspec/config.yaml": 0o644,
+        "CASH-SKILLS.md": 0o644,
+        "scripts/cash-skills/legacy-spectra-digests.tsv": 0o644,
+        ".cash-skills/lib/cash_cli/__init__.py": 0o644,
+        ".cash-skills/lib/cash_cli/installer.py": 0o644,
+        ".cash-skills/lib/cash_cli/main.py": 0o644,
+        ".cash-skills/lib/cash_cli/workspace.py": 0o644,
+        **{path: 0o644 for path in SKILL_PATHS},
+    }
+    try:
+        for relative, expected_mode in required.items():
+            metadata = os.lstat(os.path.join(project_root, relative))
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or stat.S_IMODE(metadata.st_mode) != expected_mode
+            ):
+                return False
+        version_path = os.path.join(project_root, "cash-skills.version")
+        descriptor = os.open(
+            version_path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            version = os.read(descriptor, 256).decode("ascii")
+        finally:
+            os.close(descriptor)
+        parts = version.removesuffix("\n").split(".")
+        if (
+            not version.endswith("\n")
+            or version.count("\n") != 1
+            or len(parts) != 3
+            or any(
+                not part.isdigit()
+                or not part.isascii()
+                or (len(part) > 1 and part.startswith("0"))
+                for part in parts
+            )
+        ):
+            return False
+        result = subprocess.run(
+            ["git", "-C", project_root, "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return os.path.realpath(result.stdout.strip()) == os.path.realpath(project_root)
+    except (OSError, UnicodeError, subprocess.SubprocessError):
+        return False
+
+
+def validate_receipt(project_root: str, launcher_stat: os.stat_result, lock_stat: os.stat_result) -> None:
+    global FAILURE_HINT
+    if is_source_layout(project_root):
+        FAILURE_HINT = (
+            "Run ./install-cash-skills.fish --self from the project root"
+        )
+    receipt_path = os.path.join(project_root, ".cash-skills", "receipt.tsv")
+    descriptor, _ = open_regular(receipt_path, 0o644)
+    try:
+        receipt_bytes = b""
+        while chunk := os.read(descriptor, 131072):
+            receipt_bytes += chunk
+    finally:
+        os.close(descriptor)
+    try:
+        text = receipt_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        fail("receipt_invalid", "receipt must be UTF-8")
+    if not text.endswith("\n"):
+        fail("receipt_invalid", "receipt must be LF terminated")
+    rows = [line.split("\t") for line in text.splitlines()]
+    if len(rows) < 5 or len(rows[0]) != 2 or rows[0][0] != "version":
+        fail("receipt_invalid", "receipt has an invalid header")
+    version_parts = rows[0][1].split(".")
+    if (
+        len(version_parts) != 3
+        or any(
+            not part.isascii()
+            or not part.isdigit()
+            or (len(part) > 1 and part.startswith("0"))
+            for part in version_parts
+        )
+    ):
+        fail("receipt_invalid", "receipt version is invalid")
+    if len(rows[1]) != 2 or rows[1][0] != "runtime_generation":
+        fail("receipt_invalid", "receipt is missing runtime generation")
+    generation = rows[1][1]
+    if len(generation) != 64 or any(character not in "0123456789abcdef" for character in generation):
+        fail("receipt_invalid", "runtime generation is invalid")
+
+    records: dict[str, tuple[str, str, int, int | None, int | None]] = {}
+    runtime_records: list[tuple[str, str, str]] = []
+    ordered_records: list[tuple[str, str]] = []
+    for row in rows[2:]:
+        if len(row) not in {4, 6} or row[0] not in {"stable", "runtime", "skill"}:
+            fail("receipt_invalid", "receipt record shape is invalid")
+        kind, path, digest, mode_text = row[0], row[1], row[2], row[3]
+        if path in records or path.startswith("/") or ".." in path.split("/"):
+            fail("receipt_invalid", "receipt path is invalid or duplicated")
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            fail("receipt_invalid", "receipt digest is invalid")
+        if (
+            len(mode_text) != 4
+            or not mode_text.startswith("0")
+            or any(character not in "01234567" for character in mode_text)
+        ):
+            fail("receipt_invalid", "receipt mode is invalid")
+        try:
+            mode = int(mode_text, 8)
+            device = int(row[4]) if len(row) == 6 else None
+            inode = int(row[5]) if len(row) == 6 else None
+        except ValueError:
+            fail("receipt_invalid", "receipt identity is invalid")
+        if kind == "stable" and (len(row) != 6 or device is None or inode is None):
+            fail("receipt_invalid", "stable receipt record requires identity")
+        if kind != "stable" and len(row) != 4:
+            fail("receipt_invalid", "replaceable receipt record has identity fields")
+        records[path] = (kind, digest, mode, device, inode)
+        ordered_records.append((kind, path))
+        if kind == "runtime":
+            runtime_records.append((path, digest, mode_text))
+
+    stable_order = [
+        ("stable", ".cash-skills/bin/cash"),
+        ("stable", ".cash-workspace.lock"),
+    ]
+    runtime_order = [
+        ("runtime", path)
+        for path, _, _ in sorted(
+            runtime_records,
+            key=lambda item: item[0].encode("utf-8"),
+        )
+    ]
+    skill_order = [("skill", path) for path in SKILL_PATHS]
+    if ordered_records != stable_order + runtime_order + skill_order:
+        fail("receipt_invalid", "receipt inventory or order is invalid")
+    if any(
+        mode != (0o755 if path == ".cash-skills/bin/cash" else 0o644)
+        for path, (_, _, mode, _, _) in records.items()
+    ):
+        fail("receipt_invalid", "receipt contract mode is invalid")
+    if any(
+        not path.startswith(".cash-skills/lib/cash_cli/")
+        or not path.endswith(".py")
+        for path, _, _ in runtime_records
+    ):
+        fail("receipt_invalid", "runtime receipt path is invalid")
+
+    launcher_relative = ".cash-skills/bin/cash"
+    lock_relative = ".cash-workspace.lock"
+    for relative, opened in (
+        (launcher_relative, launcher_stat),
+        (lock_relative, lock_stat),
+    ):
+        record = records.get(relative)
+        if record is None or record[0] != "stable":
+            fail("receipt_invalid", f"missing stable record: {relative}")
+        absolute = os.path.join(project_root, relative)
+        if (
+            record[1] != sha256_file(absolute)
+            or record[2] != stat.S_IMODE(opened.st_mode)
+            or record[3] != opened.st_dev
+            or record[4] != opened.st_ino
+        ):
+            fail("receipt_invalid", f"stable record drift: {relative}")
+
+    runtime_records.sort(key=lambda item: item[0].encode("utf-8"))
+    stream = "".join(
+        f"{path}\t{digest}\t{mode}\n"
+        for path, digest, mode in runtime_records
+    ).encode("utf-8")
+    if not runtime_records or hashlib.sha256(stream).hexdigest() != generation:
+        fail("receipt_invalid", "runtime generation mismatch")
+    for path, digest, mode_text in runtime_records:
+        absolute = os.path.join(project_root, path)
+        try:
+            mode = stat.S_IMODE(os.lstat(absolute).st_mode)
+        except OSError as error:
+            fail("receipt_invalid", f"{path}: {error}")
+        if f"{mode:04o}" != mode_text or sha256_file(absolute) != digest:
+            fail("receipt_invalid", f"runtime record drift: {path}")
+    FAILURE_HINT = ""
+
+
+if sys.version_info < (3, 11):
+    fail("python_version", "Cash CLI requires Python 3.11+")
+
+launcher_path = os.path.abspath(__file__)
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(launcher_path)))
+lock_path = os.path.join(project_root, ".cash-workspace.lock")
+launcher_descriptor, launcher_stat = open_regular(launcher_path, 0o755)
+os.close(launcher_descriptor)
+lock_descriptor, lock_stat = open_regular(lock_path, 0o644)
+command = sys.argv[1] if len(sys.argv) > 1 else ""
+lock_mode = fcntl.LOCK_EX if command in MUTATING_FAMILIES else fcntl.LOCK_SH
+fcntl.flock(lock_descriptor, lock_mode)
+validate_receipt(project_root, launcher_stat, lock_stat)
+
+os.environ["CASH_PROJECT_ROOT"] = project_root
+os.environ["CASH_LOCK_FD"] = str(lock_descriptor)
+library_root = os.path.join(project_root, ".cash-skills", "lib")
+sys.path.insert(0, library_root)
+
+from cash_cli.main import main
+
+
+raise SystemExit(main())

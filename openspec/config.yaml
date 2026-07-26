@@ -1,0 +1,4 @@
+schema: spec-driven
+
+# Add project context with a context block when needed.
+# Add artifact-specific instructions under rules when needed.

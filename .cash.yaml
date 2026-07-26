@@ -1,0 +1,4 @@
+locale: tw
+tdd: true
+audit: true
+parallel_tasks: true
