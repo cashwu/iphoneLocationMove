@@ -16,6 +16,7 @@ _REQUIREMENT = re.compile(r"### Requirement: (.+)")
 _RENAME_FROM = re.compile(r"- FROM: `### Requirement: (.+)`")
 _RENAME_TO = re.compile(r"- TO: `### Requirement: (.+)`")
 _CODE_SPAN = re.compile(r"`([^`\r\n]+)`")
+_PLAIN_PATH = re.compile(r"(?<!\S)([A-Za-z0-9_.@+~/-]*/[A-Za-z0-9_.@+~/-]+)")
 _TRACE = re.compile(r"\n*<!-- @trace\n.*?-->\n*", re.DOTALL)
 _VERIFICATION_CLAUSE = re.compile(
     r"(?:[；;,，]\s*)?(?:並)?以\s+|(?:verification targets?|驗證目標)\s*[:：]\s*",
@@ -135,36 +136,80 @@ def _with_trace(block: str, trace: str) -> str:
     return f"{cleaned}\n\n{trace}"
 
 
-def _paths_in_section(workspace: Workspace, path: Path, heading: str) -> list[str]:
+def _canonical_path(value: str) -> str | None:
+    while value.startswith("./") or value.endswith("/"):
+        if value.startswith("./"):
+            value = value[2:]
+        if value.endswith("/"):
+            value = value[:-1]
+    if value.startswith("/") or "/" not in value:
+        return None
+    segments = value.split("/")
+    if any(segment in {"", ".", ".."} for segment in segments):
+        return None
+    if segments[0].startswith("~"):
+        return None
+    return value
+
+
+def _paths_in_section(
+    workspace: Workspace,
+    path: Path,
+    heading: str,
+    list_label: str,
+) -> list[str]:
     relative = workspace.relative(path)
     if not workspace.is_file(relative):
         return []
     lines = workspace.read_text(relative).splitlines()
-    active = False
-    values: list[str] = []
+    in_section = False
+    in_list = False
+    values: set[str] = set()
+
+    def collect(line: str) -> None:
+        candidates = [
+            *(value for value in _CODE_SPAN.findall(line) if "/" in value),
+            *_PLAIN_PATH.findall(_CODE_SPAN.sub(" ", line)),
+        ]
+        values.update(
+            canonical
+            for value in candidates
+            if (canonical := _canonical_path(value)) is not None
+        )
+
     for line in lines:
-        if line == heading:
-            active = True
+        if line.rstrip() == heading:
+            in_section = True
             continue
-        if active and line.startswith("## "):
+        if in_section and line.startswith("## "):
             break
-        if active:
-            values.extend(value for value in _CODE_SPAN.findall(line) if "/" in value)
-    return sorted(set(values), key=lambda value: value.encode("utf-8"))
+        if not in_section:
+            continue
+        stripped = line.strip()
+        if stripped.startswith(list_label):
+            in_list = True
+            line = stripped[len(list_label) :]
+        elif in_list and stripped.startswith("- Affected "):
+            break
+        if not in_list:
+            continue
+        collect(line)
+    return sorted(values, key=lambda value: value.encode("utf-8"))
 
 
 def _verification_path(value: str) -> str | None:
-    token = value.split(maxsplit=1)[0]
-    if token == "cli-checks.fish":
+    if value == "cli-checks.fish":
         return "scripts/cash-cli/tests/cli-checks.fish"
-    if token == "skill-checks.fish":
+    if value == "skill-checks.fish":
         return "scripts/cash-skills/tests/skill-checks.fish"
-    if "/" in token and (
-        "/tests/" in f"/{token}"
-        or Path(token).name.startswith("test_")
-        or token.endswith((".fish", ".sh"))
+    if re.fullmatch(r"[A-Za-z0-9_.@+~/-]+", value) is None:
+        return None
+    canonical = _canonical_path(value)
+    if canonical is not None and (
+        "/tests/" in f"/{canonical}"
+        or Path(canonical).name.startswith("test_")
     ):
-        return token
+        return canonical
     return None
 
 
@@ -178,8 +223,9 @@ def _task_paths(workspace: Workspace, path: Path) -> list[str]:
         if clause is None:
             continue
         for value in _CODE_SPAN.findall(line[clause.end() :]):
-            if (target := _verification_path(value)) is not None:
-                values.add(target)
+            for token in value.split():
+                if (target := _verification_path(token)) is not None:
+                    values.add(target)
     return sorted(
         values,
         key=lambda value: value.encode("utf-8"),
@@ -296,7 +342,12 @@ def build_sync_plan(workspace: Workspace, name: str) -> SyncPlan:
             already_synced=True,
         )
 
-    code_paths = _paths_in_section(workspace, change / "proposal.md", "## Impact")
+    code_paths = _paths_in_section(
+        workspace,
+        change / "proposal.md",
+        "## Impact",
+        "- Affected code:",
+    )
     test_paths = _task_paths(workspace, change / "tasks.md")
     trace = _trace(name, code_paths, test_paths)
     writes: dict[str, bytes] = {}
