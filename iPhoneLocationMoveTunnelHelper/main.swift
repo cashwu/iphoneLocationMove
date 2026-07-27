@@ -895,6 +895,11 @@ final class FoundationTunnelProcess: TunnelProcessControlling {
 }
 
 final class FoundationTunnelProcessLauncher: TunnelProcessLaunching {
+    static let processEnvironment = [
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "PYTHONNOUSERSITE": "1",
+    ]
+
     func launch(
         runtime: InstalledTunnelRuntime,
         deviceID: DeviceID
@@ -911,10 +916,7 @@ final class FoundationTunnelProcessLauncher: TunnelProcessLaunching {
         ]
         process.standardOutput = output
         process.standardError = Pipe()
-        process.environment = [
-            "PATH": "/usr/bin:/bin",
-            "PYTHONNOUSERSITE": "1",
-        ]
+        process.environment = Self.processEnvironment
         do {
             try process.run()
         } catch {

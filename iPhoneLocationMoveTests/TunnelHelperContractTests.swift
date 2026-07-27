@@ -309,6 +309,14 @@ private func testEndpointAndProcessFailures() throws {
     try require(status.state == .running, "Failed stop discarded cleanup ownership")
 }
 
+private func testLaunchEnvironmentProvidesRequiredSystemTools() throws {
+    let path = FoundationTunnelProcessLauncher.processEnvironment["PATH"] ?? ""
+    let directories = Set(path.split(separator: ":").map(String.init))
+
+    try require(directories.contains("/sbin"), "Tunnel PATH cannot resolve macOS ifconfig")
+    try require(directories.contains("/usr/sbin"), "Tunnel PATH omits system administration tools")
+}
+
 private func testInvalidationAndReconcile() throws {
     let fixture = try Fixture()
     defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -546,6 +554,8 @@ private enum TunnelHelperHarness {
                 try testDeviceIdentityOwnershipAndIdempotency()
             case "process":
                 try testEndpointAndProcessFailures()
+            case "launch-environment":
+                try testLaunchEnvironmentProvidesRequiredSystemTools()
             case "cleanup":
                 try testInvalidationAndReconcile()
             case "installer":
@@ -651,6 +661,10 @@ final class TunnelHelperContractTests: XCTestCase {
 
     func testParsesEndpointAndReportsProcessExitAndStopFailure() throws {
         try run("process")
+    }
+
+    func testLaunchEnvironmentProvidesRequiredSystemTools() throws {
+        try run("launch-environment")
     }
 
     func testInvalidationAndReconcileReclaimOwnedProcesses() throws {
