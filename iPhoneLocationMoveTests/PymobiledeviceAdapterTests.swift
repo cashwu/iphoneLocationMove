@@ -352,6 +352,535 @@ final class PymobiledeviceAdapterTests: XCTestCase {
         }
     }
 
+    func testSetTransportClosureRecoversOnceAndReplaysAfterOldTransportStops() async throws {
+        let device = try makeDevice(id: "device-17")
+        let boundary = FakePymobiledeviceBoundary(devices: [device])
+        let logger = RecordingDiagnosticLogger()
+        let adapter = PymobiledeviceAdapter(boundary: boundary, diagnosticLogger: logger)
+        let session = try await adapter.connect()
+        await boundary.resetEvents()
+        await boundary.enqueueMutationBehaviors([
+            .failure(transportClosedFailure()),
+            .success,
+        ])
+        let context = DeviceMutationContext(
+            simulationSessionID: SimulationSessionID(),
+            generation: session.generation
+        )
+
+        try await adapter.setLocation(
+            DeviceCoordinate(latitude: 25, longitude: 121),
+            context: context
+        )
+
+        await XCTAssertEqualAsync(
+            { await boundary.events },
+            [
+                .set(session.generation),
+                .shutdownDVT(session.generation),
+                .stopTunnel(device.id),
+                .startTunnel(device.id),
+                .startDVT(session.generation),
+                .set(session.generation),
+            ]
+        )
+        XCTAssertEqual(
+            logger.events.map(\.event).filter {
+                $0 == "tunnel.status_probed"
+                    || $0 == "transport.recovery_started"
+                    || $0 == "location.set_succeeded"
+            },
+            [
+                "transport.recovery_started",
+                "tunnel.status_probed",
+                "location.set_succeeded",
+            ]
+        )
+    }
+
+    func testRecoveryDiagnosticFileUsesAllowlistedFieldsAndPreservesEventOrder() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let logger = DiagnosticLogger(directoryURL: directory)
+        let device = try makeDevice(id: "device-17")
+        let boundary = FakePymobiledeviceBoundary(devices: [device])
+        let adapter = PymobiledeviceAdapter(
+            boundary: boundary,
+            diagnosticLogger: logger
+        )
+        let session = try await adapter.connect()
+
+        let endpoint = "fd7e:5f3a:9c21::42"
+        let port = "62078"
+        let coordinate = "25.0330,121.5654"
+        let rawDetail = "closed at [\(endpoint)]:\(port) coordinate \(coordinate)"
+        let failure = try XCTUnwrap(
+            parseDeviceBackendFailure([
+                "code": "transport-closed",
+                "exceptionType": "ConnectionTerminatedError",
+                "errno": 54,
+                "detail": rawDetail,
+            ])
+        )
+        recordDeviceBackendFailure(
+            failure,
+            requestID: "fixture-request",
+            command: "set",
+            diagnosticLogger: logger
+        )
+        await boundary.setTunnelStatus(
+            state: .exited,
+            diagnostics: DeviceTunnelDiagnostics(
+                terminationStatus: 15,
+                stderrTail: "RSD [\(endpoint)]:\(port) latitudeLongitude=\(coordinate)",
+                stderrByteCount: 8_192
+            )
+        )
+        await boundary.setNextMutationError(.transportClosed(failure))
+
+        await XCTAssertThrowsDeviceError(
+            .tunnelFailure("Tunnel process exited before recovery")
+        ) {
+            try await adapter.setLocation(
+                DeviceCoordinate(latitude: 25, longitude: 121),
+                context: DeviceMutationContext(
+                    simulationSessionID: SimulationSessionID(),
+                    generation: session.generation
+                )
+            )
+        }
+
+        let data = try Data(contentsOf: logger.fileURL)
+        let serialized = String(decoding: data, as: UTF8.self)
+        XCTAssertFalse(serialized.contains(rawDetail))
+        XCTAssertFalse(serialized.contains(endpoint))
+        XCTAssertFalse(serialized.contains(port))
+        XCTAssertFalse(serialized.contains(coordinate))
+
+        let entries = try serialized
+            .split(whereSeparator: \.isNewline)
+            .map { line -> [String: Any] in
+                try XCTUnwrap(
+                    JSONSerialization.jsonObject(
+                        with: Data(line.utf8)
+                    ) as? [String: Any]
+                )
+            }
+        let recoveryEvents = entries.compactMap { $0["event"] as? String }
+            .filter {
+                [
+                    "dvt.transport_closed",
+                    "transport.recovery_started",
+                    "tunnel.status_probed",
+                    "transport.recovery_failed",
+                ].contains($0)
+            }
+        XCTAssertEqual(
+            recoveryEvents,
+            [
+                "dvt.transport_closed",
+                "transport.recovery_started",
+                "tunnel.status_probed",
+                "transport.recovery_failed",
+            ]
+        )
+
+        let allowedMetadataKeys: Set<String> = [
+            "requestID",
+            "command",
+            "failureCode",
+            "exceptionType",
+            "errno",
+            "logicalGeneration",
+            "transportGeneration",
+            "attempt",
+            "state",
+            "terminationStatus",
+            "stderrByteCount",
+        ]
+        for entry in entries where recoveryEvents.contains(entry["event"] as? String ?? "") {
+            let metadata = try XCTUnwrap(entry["metadata"] as? [String: String])
+            XCTAssertTrue(Set(metadata.keys).isSubset(of: allowedMetadataKeys))
+        }
+        let statusEntry = try XCTUnwrap(
+            entries.first { $0["event"] as? String == "tunnel.status_probed" }
+        )
+        let statusMetadata = try XCTUnwrap(
+            statusEntry["metadata"] as? [String: String]
+        )
+        XCTAssertEqual(statusMetadata["state"], "exited")
+        XCTAssertEqual(statusMetadata["terminationStatus"], "15")
+        XCTAssertEqual(statusMetadata["stderrByteCount"], "8192")
+    }
+
+    func testClearTransportClosureRecoversOnceBeforeReleasingOwnership() async throws {
+        let device = try makeDevice(id: "device-17")
+        let boundary = FakePymobiledeviceBoundary(devices: [device])
+        let adapter = PymobiledeviceAdapter(boundary: boundary)
+        let session = try await adapter.connect()
+        try await adapter.setLocation(
+            DeviceCoordinate(latitude: 25, longitude: 121),
+            context: DeviceMutationContext(
+                simulationSessionID: SimulationSessionID(),
+                generation: session.generation
+            )
+        )
+        await boundary.resetEvents()
+        await boundary.enqueueMutationBehaviors([
+            .failure(transportClosedFailure()),
+            .success,
+        ])
+
+        try await adapter.clearLocation(
+            context: DeviceCleanupContext(generation: session.generation)
+        )
+
+        await XCTAssertEqualAsync(
+            { await boundary.events },
+            [
+                .clear(session.generation),
+                .shutdownDVT(session.generation),
+                .stopTunnel(device.id),
+                .startTunnel(device.id),
+                .startDVT(session.generation),
+                .clear(session.generation),
+            ]
+        )
+        await XCTAssertEqualAsync(
+            { await adapter.state },
+            .ready(session)
+        )
+    }
+
+    func testRecoveryReplayFailureIsTerminalWithoutRecursiveRecovery() async throws {
+        let device = try makeDevice(id: "device-17")
+        let boundary = FakePymobiledeviceBoundary(devices: [device])
+        let adapter = PymobiledeviceAdapter(boundary: boundary)
+        let session = try await adapter.connect()
+        await boundary.resetEvents()
+        await boundary.enqueueMutationBehaviors([
+            .failure(transportClosedFailure()),
+            .failure(transportClosedFailure()),
+        ])
+
+        await XCTAssertThrowsDeviceError(transportClosedFailure()) {
+            try await adapter.setLocation(
+                DeviceCoordinate(latitude: 25, longitude: 121),
+                context: DeviceMutationContext(
+                    simulationSessionID: SimulationSessionID(),
+                    generation: session.generation
+                )
+            )
+        }
+
+        await XCTAssertEqualAsync(
+            { (await boundary.events).filter { $0 == .startTunnel(device.id) }.count },
+            1
+        )
+        await XCTAssertEqualAsync(
+            { (await boundary.events).filter { $0 == .set(session.generation) }.count },
+            2
+        )
+    }
+
+    func testTunnelExitedFailureIsTerminalAndDoesNotStartReplacement() async throws {
+        let device = try makeDevice(id: "device-17")
+        let boundary = FakePymobiledeviceBoundary(devices: [device])
+        let adapter = PymobiledeviceAdapter(boundary: boundary)
+        let session = try await adapter.connect()
+        await boundary.resetEvents()
+        await boundary.enqueueMutationBehaviors([
+            .failure(.tunnelFailure("exited")),
+        ])
+
+        await XCTAssertThrowsDeviceError(.tunnelFailure("exited")) {
+            try await adapter.setLocation(
+                DeviceCoordinate(latitude: 25, longitude: 121),
+                context: DeviceMutationContext(
+                    simulationSessionID: SimulationSessionID(),
+                    generation: session.generation
+                )
+            )
+        }
+
+        await XCTAssertEqualAsync(
+            { await boundary.events },
+            [.set(session.generation)]
+        )
+    }
+
+    func testCandidateReplayDoesNotPublishSuccessBeforeAtomicCommit() async throws {
+        let device = try makeDevice(id: "device-17")
+        let boundary = FakePymobiledeviceBoundary(devices: [device])
+        let logger = RecordingDiagnosticLogger()
+        let adapter = PymobiledeviceAdapter(boundary: boundary, diagnosticLogger: logger)
+        let session = try await adapter.connect()
+        await boundary.enqueueMutationBehaviors([
+            .failure(transportClosedFailure()),
+            .suspended,
+        ])
+        let context = DeviceMutationContext(
+            simulationSessionID: SimulationSessionID(),
+            generation: session.generation
+        )
+        let mutation = Task {
+            try await adapter.setLocation(
+                DeviceCoordinate(latitude: 25, longitude: 121),
+                context: context
+            )
+        }
+        guard await boundary.waitForPendingMutationCount(1) else {
+            _ = try? await mutation.value
+            return XCTFail("Expected candidate replay to remain pending before commit")
+        }
+
+        XCTAssertFalse(logger.events.map(\.event).contains("location.set_succeeded"))
+        await XCTAssertEqualAsync(
+            { await adapter.state },
+            .ready(session)
+        )
+
+        await boundary.completeNextMutation(requestID: context.requestID)
+        try await mutation.value
+        XCTAssertTrue(logger.events.map(\.event).contains("location.set_succeeded"))
+
+        try await adapter.setLocation(
+            DeviceCoordinate(latitude: 24, longitude: 120),
+            context: DeviceMutationContext(
+                simulationSessionID: context.simulationSessionID,
+                generation: session.generation
+            )
+        )
+    }
+
+    func testCandidateLeaseIsCleanedWhenDVTStartFailsBeforeIdentityIsComplete() async throws {
+        let device = try makeDevice(id: "device-17")
+        let boundary = FakePymobiledeviceBoundary(devices: [device])
+        let adapter = PymobiledeviceAdapter(boundary: boundary)
+        let session = try await adapter.connect()
+        await boundary.resetEvents()
+        await boundary.enqueueMutationBehaviors([
+            .failure(transportClosedFailure()),
+        ])
+        await boundary.setFailure(
+            .helperFailure("candidate DVT failed"),
+            at: .startDVT(session.generation)
+        )
+
+        await XCTAssertThrowsDeviceError(.helperFailure("candidate DVT failed")) {
+            try await adapter.setLocation(
+                DeviceCoordinate(latitude: 25, longitude: 121),
+                context: DeviceMutationContext(
+                    simulationSessionID: SimulationSessionID(),
+                    generation: session.generation
+                )
+            )
+        }
+
+        await XCTAssertEqualAsync(
+            { (await boundary.events).filter { $0 == .startTunnel(device.id) }.count },
+            1
+        )
+        await XCTAssertEqualAsync(
+            { (await boundary.events).filter { $0 == .startDVT(session.generation) }.count },
+            1
+        )
+        await XCTAssertEqualAsync(
+            { (await boundary.events).filter { $0 == .stopTunnel(device.id) }.count },
+            2
+        )
+        await XCTAssertEqualAsync(
+            { (await boundary.events).filter { $0 == .set(session.generation) }.count },
+            1
+        )
+    }
+
+    func testDisconnectAfterStatusProbeCancelsRecoveryBeforeRestart() async throws {
+        let device = try makeDevice(id: "device-17")
+        let boundary = FakePymobiledeviceBoundary(devices: [device])
+        let adapter = PymobiledeviceAdapter(boundary: boundary)
+        let session = try await adapter.connect()
+        await boundary.enqueueMutationBehaviors([
+            .failure(transportClosedFailure()),
+        ])
+        await boundary.suspendNextTunnelStop()
+        let mutation = Task {
+            try await adapter.setLocation(
+                DeviceCoordinate(latitude: 25, longitude: 121),
+                context: DeviceMutationContext(
+                    simulationSessionID: SimulationSessionID(),
+                    generation: session.generation
+                )
+            )
+        }
+        let reachedStatusBoundary = await boundary.waitForPendingTunnelStop()
+        XCTAssertTrue(reachedStatusBoundary)
+
+        let disconnect = Task {
+            await adapter.handleUSBDisconnect(deviceID: device.id)
+        }
+        await Task.yield()
+        await boundary.completePendingTunnelStop()
+        await disconnect.value
+
+        await XCTAssertThrowsDeviceError(.staleGeneration) {
+            try await mutation.value
+        }
+        await XCTAssertEqualAsync(
+            { (await boundary.events).filter { $0 == .set(session.generation) }.count },
+            1
+        )
+        await XCTAssertEqualAsync(
+            { (await boundary.events).filter { $0 == .stopTunnel(device.id) }.count },
+            2
+        )
+    }
+
+    func testReconnectWhileReplayPendingKeepsNewSessionAndIgnoresStaleCompletion() async throws {
+        let device = try makeDevice(id: "device-17")
+        let boundary = FakePymobiledeviceBoundary(devices: [device])
+        let adapter = PymobiledeviceAdapter(boundary: boundary)
+        let oldSession = try await adapter.connect()
+        await boundary.enqueueMutationBehaviors([
+            .failure(transportClosedFailure()),
+            .suspended,
+        ])
+        let oldContext = DeviceMutationContext(
+            simulationSessionID: SimulationSessionID(),
+            generation: oldSession.generation
+        )
+        let oldMutation = Task {
+            try await adapter.setLocation(
+                DeviceCoordinate(latitude: 25, longitude: 121),
+                context: oldContext
+            )
+        }
+        guard await boundary.waitForPendingMutationCount(1) else {
+            _ = try? await oldMutation.value
+            return XCTFail("Expected recovery replay to remain pending")
+        }
+
+        await adapter.handleUSBDisconnect(deviceID: device.id)
+        let reconnect = Task { try await adapter.reconnect() }
+        await boundary.completeNextMutation(requestID: oldContext.requestID)
+
+        await XCTAssertThrowsDeviceError(.staleGeneration) {
+            try await oldMutation.value
+        }
+        let newSession = try await reconnect.value
+        XCTAssertNotEqual(newSession.generation, oldSession.generation)
+        await XCTAssertEqualAsync(
+            { await adapter.state },
+            .ready(newSession)
+        )
+        await XCTAssertEqualAsync(
+            { (await boundary.events).filter { $0 == .set(oldSession.generation) }.count },
+            2
+        )
+    }
+
+    func testQuitDuringCandidateTunnelStartCleansCandidateWithoutPublishingSuccess() async throws {
+        let device = try makeDevice(id: "device-17")
+        let boundary = FakePymobiledeviceBoundary(devices: [device])
+        let logger = RecordingDiagnosticLogger()
+        let adapter = PymobiledeviceAdapter(boundary: boundary, diagnosticLogger: logger)
+        let session = try await adapter.connect()
+        let simulationID = SimulationSessionID()
+        try await adapter.setLocation(
+            DeviceCoordinate(latitude: 25, longitude: 121),
+            context: DeviceMutationContext(
+                simulationSessionID: simulationID,
+                generation: session.generation
+            )
+        )
+        let successCountBeforeRecovery = logger.events
+            .map(\.event)
+            .filter { $0 == "location.set_succeeded" }
+            .count
+        await boundary.enqueueMutationBehaviors([
+            .failure(transportClosedFailure()),
+        ])
+        await boundary.suspendNextTunnelStart()
+        let context = DeviceMutationContext(
+            simulationSessionID: simulationID,
+            generation: session.generation
+        )
+        let mutation = Task {
+            try await adapter.setLocation(
+                DeviceCoordinate(latitude: 24, longitude: 120),
+                context: context
+            )
+        }
+        guard await boundary.waitForPendingTunnelStart() else {
+            _ = try? await mutation.value
+            return XCTFail("Expected candidate tunnel start to remain pending")
+        }
+
+        let quit = Task { try await adapter.teardownForQuit() }
+        await Task.yield()
+        await boundary.completePendingTunnelStart()
+        await XCTAssertThrowsDeviceError(.staleGeneration) {
+            try await mutation.value
+        }
+        try await quit.value
+
+        XCTAssertEqual(
+            logger.events.map(\.event).filter { $0 == "location.set_succeeded" }.count,
+            successCountBeforeRecovery
+        )
+        await XCTAssertEqualAsync(
+            { (await boundary.events).contains(.clear(session.generation)) },
+            true
+        )
+        await XCTAssertEqualAsync(
+            { await adapter.state },
+            .disconnected
+        )
+    }
+
+    func testDeviceSwitchDuringCandidateTunnelStartDoesNotReplayOldCoordinate() async throws {
+        let firstDevice = try makeDevice(id: "first-device")
+        let secondDevice = try makeDevice(id: "second-device")
+        let boundary = FakePymobiledeviceBoundary(devices: [firstDevice, secondDevice])
+        let adapter = PymobiledeviceAdapter(boundary: boundary)
+        let session = try await adapter.connect(selectedDeviceID: firstDevice.id)
+        await boundary.enqueueMutationBehaviors([
+            .failure(transportClosedFailure()),
+        ])
+        await boundary.suspendNextTunnelStart()
+        let mutation = Task {
+            try await adapter.setLocation(
+                DeviceCoordinate(latitude: 25, longitude: 121),
+                context: DeviceMutationContext(
+                    simulationSessionID: SimulationSessionID(),
+                    generation: session.generation
+                )
+            )
+        }
+        let reachedCandidateTunnel = await boundary.waitForPendingTunnelStart()
+        XCTAssertTrue(reachedCandidateTunnel)
+
+        let deviceSwitch = Task {
+            try await adapter.switchDevice(to: secondDevice.id)
+        }
+        await boundary.completePendingTunnelStart()
+        await XCTAssertThrowsDeviceError(.staleGeneration) {
+            try await mutation.value
+        }
+        let switched = try await deviceSwitch.value
+
+        XCTAssertEqual(switched.device, secondDevice)
+        await XCTAssertEqualAsync(
+            { (await boundary.events).filter { $0 == .set(session.generation) }.count },
+            1
+        )
+        await XCTAssertEqualAsync(
+            { (await boundary.events).contains(.clear(session.generation)) },
+            true
+        )
+    }
+
     func testReadyAndActiveQuitTeardownUseRequiredOrder() async throws {
         let device = try makeDevice(id: "device-17")
         let readyBoundary = FakePymobiledeviceBoundary(devices: [device])
@@ -426,6 +955,12 @@ private enum FakeBoundaryEvent: Equatable, Hashable, Sendable {
     case reconcile
 }
 
+private enum FakeMutationBehavior: Equatable, Sendable {
+    case success
+    case failure(DeviceLocationError)
+    case suspended
+}
+
 private actor FakePymobiledeviceBoundary: PymobiledeviceBoundary {
     private struct PendingMutation {
         let continuation: CheckedContinuation<DVTLocationReply, Error>
@@ -437,8 +972,19 @@ private actor FakePymobiledeviceBoundary: PymobiledeviceBoundary {
     private(set) var maximumConcurrentMutationCount = 0
     private var failures: [FakeBoundaryEvent: DeviceLocationError] = [:]
     private var nextMutationError: DeviceLocationError?
+    private var mutationBehaviors: [FakeMutationBehavior] = []
     private var mutationSuspended = false
     private var pendingMutations: [PendingMutation] = []
+    private var shouldSuspendNextTunnelStart = false
+    private var pendingTunnelStart: CheckedContinuation<Void, Never>?
+    private var shouldSuspendNextTunnelStop = false
+    private var pendingTunnelStop: CheckedContinuation<Void, Never>?
+    private var tunnelLeaseState: DeviceTunnelLeaseState = .running
+    private var tunnelDiagnostics = DeviceTunnelDiagnostics(
+        terminationStatus: nil,
+        stderrTail: "",
+        stderrByteCount: 0
+    )
 
     init(devices: [USBDevice]) {
         self.devices = devices
@@ -482,6 +1028,12 @@ private actor FakePymobiledeviceBoundary: PymobiledeviceBoundary {
         idempotencyKey: UUID
     ) async throws -> DeviceTunnelLease {
         try record(.startTunnel(device.id))
+        if shouldSuspendNextTunnelStart {
+            shouldSuspendNextTunnelStart = false
+            await withCheckedContinuation { continuation in
+                pendingTunnelStart = continuation
+            }
+        }
         return DeviceTunnelLease(
             id: DeviceTunnelLeaseID(),
             deviceID: device.id,
@@ -507,6 +1059,17 @@ private actor FakePymobiledeviceBoundary: PymobiledeviceBoundary {
         case .clear:
             events.append(.clear(generation))
         }
+        if !mutationBehaviors.isEmpty {
+            let behavior = mutationBehaviors.removeFirst()
+            switch behavior {
+            case .success:
+                return DVTLocationReply(requestID: command.requestID)
+            case let .failure(error):
+                throw error
+            case .suspended:
+                return try await suspendMutation()
+            }
+        }
         if let error = nextMutationError {
             nextMutationError = nil
             throw error
@@ -514,14 +1077,7 @@ private actor FakePymobiledeviceBoundary: PymobiledeviceBoundary {
         guard mutationSuspended else {
             return DVTLocationReply(requestID: command.requestID)
         }
-        pendingMutationCount += 1
-        maximumConcurrentMutationCount = max(
-            maximumConcurrentMutationCount,
-            pendingMutationCount
-        )
-        return try await withCheckedThrowingContinuation { continuation in
-            pendingMutations.append(PendingMutation(continuation: continuation))
-        }
+        return try await suspendMutation()
     }
 
     func shutdownDVT(generation: DeviceSessionGeneration) async throws {
@@ -530,6 +1086,24 @@ private actor FakePymobiledeviceBoundary: PymobiledeviceBoundary {
 
     func stopTunnel(_ lease: DeviceTunnelLease) async throws {
         try record(.stopTunnel(lease.deviceID))
+        if shouldSuspendNextTunnelStop {
+            shouldSuspendNextTunnelStop = false
+            await withCheckedContinuation { continuation in
+                pendingTunnelStop = continuation
+            }
+        }
+    }
+
+    func tunnelStatus(
+        _ lease: DeviceTunnelLease
+    ) async throws -> DeviceTunnelStatus {
+        DeviceTunnelStatus(
+            leaseID: lease.id,
+            deviceID: lease.deviceID,
+            endpoint: lease.endpoint,
+            state: tunnelLeaseState,
+            diagnostics: tunnelDiagnostics
+        )
     }
 
     func reconcileTunnels() async throws {
@@ -544,8 +1118,60 @@ private actor FakePymobiledeviceBoundary: PymobiledeviceBoundary {
         nextMutationError = error
     }
 
+    func enqueueMutationBehaviors(_ newBehaviors: [FakeMutationBehavior]) {
+        mutationBehaviors.append(contentsOf: newBehaviors)
+    }
+
     func setMutationSuspended(_ suspended: Bool) {
         mutationSuspended = suspended
+    }
+
+    func setTunnelStatus(
+        state: DeviceTunnelLeaseState,
+        diagnostics: DeviceTunnelDiagnostics
+    ) {
+        tunnelLeaseState = state
+        tunnelDiagnostics = diagnostics
+    }
+
+    func suspendNextTunnelStart() {
+        shouldSuspendNextTunnelStart = true
+    }
+
+    func suspendNextTunnelStop() {
+        shouldSuspendNextTunnelStop = true
+    }
+
+    func waitForPendingTunnelStart() async -> Bool {
+        for _ in 0 ..< 500 {
+            if pendingTunnelStart != nil {
+                return true
+            }
+            await Task.yield()
+        }
+        return false
+    }
+
+    func completePendingTunnelStart() {
+        shouldSuspendNextTunnelStart = false
+        pendingTunnelStart?.resume()
+        pendingTunnelStart = nil
+    }
+
+    func waitForPendingTunnelStop() async -> Bool {
+        for _ in 0 ..< 500 {
+            if pendingTunnelStop != nil {
+                return true
+            }
+            await Task.yield()
+        }
+        return false
+    }
+
+    func completePendingTunnelStop() {
+        shouldSuspendNextTunnelStop = false
+        pendingTunnelStop?.resume()
+        pendingTunnelStop = nil
     }
 
     func completeNextMutation(requestID: DeviceRequestID) {
@@ -554,10 +1180,15 @@ private actor FakePymobiledeviceBoundary: PymobiledeviceBoundary {
         pending.continuation.resume(returning: DVTLocationReply(requestID: requestID))
     }
 
-    func waitForPendingMutationCount(_ expected: Int) async {
-        while pendingMutationCount != expected {
+    @discardableResult
+    func waitForPendingMutationCount(_ expected: Int) async -> Bool {
+        for _ in 0 ..< 2_000 {
+            if pendingMutationCount == expected {
+                return true
+            }
             await Task.yield()
         }
+        return false
     }
 
     func resetEvents() {
@@ -570,6 +1201,61 @@ private actor FakePymobiledeviceBoundary: PymobiledeviceBoundary {
             throw failure
         }
     }
+
+    private func suspendMutation() async throws -> DVTLocationReply {
+        pendingMutationCount += 1
+        maximumConcurrentMutationCount = max(
+            maximumConcurrentMutationCount,
+            pendingMutationCount
+        )
+        return try await withCheckedThrowingContinuation { continuation in
+            pendingMutations.append(PendingMutation(continuation: continuation))
+        }
+    }
+}
+
+private final class RecordingDiagnosticLogger: DiagnosticLogging, @unchecked Sendable {
+    struct Event: Sendable {
+        let level: DiagnosticLogLevel
+        let category: String
+        let event: String
+        let metadata: [String: String]
+    }
+
+    private let lock = NSLock()
+    private var recordedEvents: [Event] = []
+
+    var events: [Event] {
+        lock.withLock { recordedEvents }
+    }
+
+    func record(
+        _ level: DiagnosticLogLevel,
+        category: String,
+        event: String,
+        metadata: [String: String]
+    ) {
+        lock.withLock {
+            recordedEvents.append(
+                Event(
+                    level: level,
+                    category: category,
+                    event: event,
+                    metadata: metadata
+                )
+            )
+        }
+    }
+}
+
+private func transportClosedFailure() -> DeviceLocationError {
+    .transportClosed(
+        DeviceBackendFailure(
+            code: .transportClosed,
+            exceptionType: "ConnectionTerminatedError",
+            errorNumber: nil
+        )
+    )
 }
 
 private func XCTAssertThrowsDeviceError<T>(

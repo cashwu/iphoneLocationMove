@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import json
 import sys
 import unittest
@@ -8,6 +9,10 @@ HELPER_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HELPER_ROOT))
 
 from helper import ProtocolProcessor
+
+
+class ConnectionTerminatedError(Exception):
+    """Test double for pymobiledevice3's transport exception."""
 
 
 class FakeLocationBackend:
@@ -88,6 +93,92 @@ class ProtocolProcessorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed["requestID"], "clear-1")
         self.assertEqual(succeeded, {"requestID": "clear-2", "ok": True})
         self.assertEqual(self.backend.clear_calls, 1)
+
+    async def test_connection_terminated_error_is_transport_closed(self) -> None:
+        self.backend.fail_next = ConnectionTerminatedError("Connection closed")
+
+        response, _ = await self.processor.handle_line(
+            '{"requestID":"set-transport","command":"set","latitude":25.033,"longitude":121.5654}'
+        )
+
+        self.assertEqual(response["error"]["code"], "transport-closed")
+        self.assertEqual(
+            response["error"]["detail"],
+            "ConnectionTerminatedError: Connection closed",
+        )
+
+    async def test_socket_closure_exceptions_are_transport_closed(self) -> None:
+        for error in (
+            ConnectionResetError("connection reset"),
+            BrokenPipeError("broken pipe"),
+            EOFError("unexpected EOF"),
+        ):
+            with self.subTest(exception_type=type(error).__name__):
+                self.backend.fail_next = error
+
+                response, _ = await self.processor.handle_line(
+                    '{"requestID":"clear-socket","command":"clear"}'
+                )
+
+                self.assertEqual(response["error"]["code"], "transport-closed")
+
+    async def test_route_errno_values_are_transport_closed(self) -> None:
+        for error_number in (
+            errno.ENETDOWN,
+            errno.ENETUNREACH,
+            errno.EHOSTUNREACH,
+            errno.ECONNABORTED,
+            errno.ECONNRESET,
+            errno.ENOTCONN,
+            errno.EPIPE,
+        ):
+            with self.subTest(errno=error_number):
+                self.backend.fail_next = OSError(error_number, "route unavailable")
+
+                response, _ = await self.processor.handle_line(
+                    '{"requestID":"clear-route","command":"clear"}'
+                )
+
+                self.assertEqual(response["error"]["code"], "transport-closed")
+
+    async def test_transport_closure_in_causal_chain_is_transport_closed(self) -> None:
+        for chain_attribute in ("__cause__", "__context__"):
+            with self.subTest(chain_attribute=chain_attribute):
+                outer_error = RuntimeError("backend wrapper")
+                setattr(
+                    outer_error,
+                    chain_attribute,
+                    ConnectionResetError("connection reset"),
+                )
+                self.backend.fail_next = outer_error
+
+                response, _ = await self.processor.handle_line(
+                    '{"requestID":"clear-chain","command":"clear"}'
+                )
+
+                self.assertEqual(response["error"]["code"], "transport-closed")
+
+    async def test_non_transport_backend_exception_remains_backend_failure(self) -> None:
+        self.backend.fail_next = RuntimeError(
+            "Connection closed and No route to host are only message text"
+        )
+
+        response, _ = await self.processor.handle_line(
+            '{"requestID":"clear-backend","command":"clear"}'
+        )
+
+        self.assertEqual(response["error"]["code"], "backend-failure")
+
+    async def test_backend_failure_detail_is_bounded_to_2048_characters(self) -> None:
+        self.backend.fail_next = RuntimeError("x" * 4096)
+
+        response, _ = await self.processor.handle_line(
+            '{"requestID":"clear-detail","command":"clear"}'
+        )
+
+        self.assertEqual(response["error"]["code"], "backend-failure")
+        self.assertEqual(len(response["error"]["detail"]), 2048)
+        self.assertTrue(response["error"]["detail"].startswith("RuntimeError: "))
 
     async def test_ping_does_not_mutate_location(self) -> None:
         response, should_shutdown = await self.processor.handle_line(

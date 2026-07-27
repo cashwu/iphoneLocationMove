@@ -68,8 +68,33 @@ protocol PymobiledeviceBoundary: Sendable {
         generation: DeviceSessionGeneration
     ) async throws -> DVTLocationReply
     func shutdownDVT(generation: DeviceSessionGeneration) async throws
+    func tunnelStatus(_ lease: DeviceTunnelLease) async throws -> DeviceTunnelStatus
     func stopTunnel(_ lease: DeviceTunnelLease) async throws
     func reconcileTunnels() async throws
+}
+
+extension PymobiledeviceBoundary {
+    func tunnelStatus(_ lease: DeviceTunnelLease) async throws -> DeviceTunnelStatus {
+        DeviceTunnelStatus(
+            leaseID: lease.id,
+            deviceID: lease.deviceID,
+            endpoint: lease.endpoint,
+            state: .running,
+            diagnostics: DeviceTunnelDiagnostics(
+                terminationStatus: nil,
+                stderrTail: "",
+                stderrByteCount: 0
+            )
+        )
+    }
+}
+
+private struct RecoveryOwnership: Equatable, Sendable {
+    let deviceID: DeviceID
+    let logicalGeneration: DeviceSessionGeneration
+    let oldTransportGeneration: DeviceTransportGeneration
+    let oldLeaseID: DeviceTunnelLeaseID
+    let epoch: RecoveryOwnershipEpoch
 }
 
 private actor DeviceMutationQueue {
@@ -98,9 +123,12 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
     private let diagnosticLogger: any DiagnosticLogging
 
     private var generation = DeviceSessionGeneration(rawValue: 0)
+    private var transportGeneration = DeviceTransportGeneration(rawValue: 0)
+    private var recoveryOwnershipEpoch = RecoveryOwnershipEpoch(rawValue: 0)
     private var runtime: RuntimeInstallation?
     private var session: PreparedDeviceSession?
     private var tunnelLease: DeviceTunnelLease?
+    private var dvtHandle: DeviceDVTSessionHandle?
     private var disconnectedDeviceID: DeviceID?
     private var activeSimulationSessionID: SimulationSessionID?
 
@@ -164,6 +192,7 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
         guard let disconnectedDeviceID else {
             throw DeviceLocationError.usbDisconnected
         }
+        try invalidateRecoveryOwnership()
 
         let newSession = try await prepareSession(
             selectedDeviceID: disconnectedDeviceID,
@@ -186,6 +215,7 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
     }
 
     func switchDevice(to deviceID: DeviceID) async throws -> PreparedDeviceSession {
+        try invalidateRecoveryOwnership()
         if let session, let lease = tunnelLease {
             do {
                 try await sendClear(
@@ -203,8 +233,10 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
 
             try await boundary.shutdownDVT(generation: session.generation)
             try await boundary.stopTunnel(lease)
+            transportGeneration = try transportGeneration.advanced()
             self.session = nil
             tunnelLease = nil
+            dvtHandle = nil
             runtime = nil
             activeSimulationSessionID = nil
         }
@@ -267,13 +299,15 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
         }
 
         activeSimulationSessionID = context.simulationSessionID
-        let boundary = self.boundary
         let command = DVTLocationCommand.set(
             requestID: context.requestID,
             coordinate: coordinate
         )
         let reply = try await mutationQueue.perform {
-            try await boundary.sendDVT(command, generation: context.generation)
+            try await self.performQueuedMutation(
+                command,
+                session: session
+            )
         }
 
         guard self.session?.generation == context.generation,
@@ -347,6 +381,7 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
         )
 
         do {
+            try invalidateRecoveryOwnership()
             generation = try generation.advanced()
         } catch {
             state = .interrupted(
@@ -373,11 +408,15 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
         if let tunnelLease {
             try? await boundary.stopTunnel(tunnelLease)
         }
+        transportGeneration = (try? transportGeneration.advanced())
+            ?? transportGeneration
         tunnelLease = nil
+        dvtHandle = nil
         runtime = nil
     }
 
     func teardownForQuit() async throws {
+        try invalidateRecoveryOwnership()
         diagnosticLogger.record(.info, category: "device", event: "teardown.started")
         if let session, let lease = tunnelLease {
             if activeSimulationSessionID != nil {
@@ -393,17 +432,23 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
             }
             try await boundary.shutdownDVT(generation: session.generation)
             try await boundary.stopTunnel(lease)
+            transportGeneration = try transportGeneration.advanced()
         }
         try await boundary.reconcileTunnels()
 
         runtime = nil
         session = nil
         tunnelLease = nil
+        dvtHandle = nil
         selectedDevice = nil
         disconnectedDeviceID = nil
         activeSimulationSessionID = nil
         state = .disconnected
         diagnosticLogger.record(.info, category: "device", event: "teardown.completed")
+    }
+
+    private func invalidateRecoveryOwnership() throws {
+        recoveryOwnershipEpoch = try recoveryOwnershipEpoch.advanced()
     }
 
     private func prepareSession(
@@ -511,10 +556,13 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
             device: device,
             generation: newGeneration
         )
+        let newTransportGeneration = try transportGeneration.advanced()
         generation = newGeneration
+        transportGeneration = newTransportGeneration
         self.runtime = runtime
         session = prepared
         tunnelLease = lease
+        dvtHandle = DeviceDVTSessionHandle()
         selectedDevice = device
         if publishReady {
             state = .ready(prepared)
@@ -584,10 +632,12 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
         guard context.generation == session.generation else {
             throw DeviceLocationError.staleGeneration
         }
-        let boundary = self.boundary
         let command = DVTLocationCommand.clear(requestID: context.requestID)
         let reply = try await mutationQueue.perform {
-            try await boundary.sendDVT(command, generation: context.generation)
+            try await self.performQueuedMutation(
+                command,
+                session: session
+            )
         }
 
         guard self.session?.generation == context.generation,
@@ -598,6 +648,218 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
         guard reply.requestID == context.requestID else {
             throw DeviceLocationError.responseMismatch
         }
+    }
+
+    private func performQueuedMutation(
+        _ command: DVTLocationCommand,
+        session expectedSession: PreparedDeviceSession
+    ) async throws -> DVTLocationReply {
+        let initialTransportGeneration = transportGeneration
+        do {
+            let reply = try await boundary.sendDVT(
+                command,
+                generation: expectedSession.generation
+            )
+            guard session == expectedSession,
+                  generation == expectedSession.generation,
+                  transportGeneration == initialTransportGeneration
+            else {
+                throw DeviceLocationError.staleGeneration
+            }
+            return reply
+        } catch let error as DeviceLocationError {
+            guard case .transportClosed = error else {
+                throw error
+            }
+            return try await recoverTransport(
+                andReplay: command,
+                session: expectedSession,
+                oldTransportGeneration: initialTransportGeneration
+            )
+        }
+    }
+
+    private func recoverTransport(
+        andReplay command: DVTLocationCommand,
+        session expectedSession: PreparedDeviceSession,
+        oldTransportGeneration: DeviceTransportGeneration
+    ) async throws -> DVTLocationReply {
+        guard let oldLease = tunnelLease,
+              let runtime,
+              session == expectedSession,
+              generation == expectedSession.generation,
+              transportGeneration == oldTransportGeneration
+        else {
+            throw DeviceLocationError.staleGeneration
+        }
+        let ownership = RecoveryOwnership(
+            deviceID: expectedSession.device.id,
+            logicalGeneration: expectedSession.generation,
+            oldTransportGeneration: oldTransportGeneration,
+            oldLeaseID: oldLease.id,
+            epoch: recoveryOwnershipEpoch
+        )
+        let candidateGeneration = try oldTransportGeneration.advanced()
+        var candidateLease: DeviceTunnelLease?
+        var candidateDVTStarted = false
+
+        diagnosticLogger.record(
+            .warning,
+            category: "transport",
+            event: "transport.recovery_started",
+            metadata: recoveryMetadata(
+                command: command,
+                transportGeneration: oldTransportGeneration,
+                attempt: 1
+            )
+        )
+
+        do {
+            try validateRecoveryOwnership(ownership)
+            try await boundary.shutdownDVT(
+                generation: expectedSession.generation
+            )
+            try validateRecoveryOwnership(ownership)
+
+            let status = try await boundary.tunnelStatus(oldLease)
+            try validateRecoveryOwnership(ownership)
+            diagnosticLogger.record(
+                .info,
+                category: "transport",
+                event: "tunnel.status_probed",
+                metadata: tunnelStatusMetadata(
+                    status,
+                    command: command,
+                    transportGeneration: oldTransportGeneration
+                )
+            )
+            guard status.state == .running else {
+                throw DeviceLocationError.tunnelFailure(
+                    "Tunnel process exited before recovery"
+                )
+            }
+
+            try await boundary.stopTunnel(oldLease)
+            try validateRecoveryOwnership(ownership)
+
+            let lease = try await boundary.startTunnel(
+                for: expectedSession.device,
+                idempotencyKey: UUID()
+            )
+            candidateLease = lease
+            try validateRecoveryOwnership(ownership)
+
+            try await boundary.startDVT(
+                runtime: runtime,
+                lease: lease,
+                generation: expectedSession.generation
+            )
+            candidateDVTStarted = true
+            try validateRecoveryOwnership(ownership)
+
+            let candidateIdentity = CandidateTransportIdentity(
+                generation: candidateGeneration,
+                leaseID: lease.id,
+                dvtHandle: DeviceDVTSessionHandle()
+            )
+            let reply = try await boundary.sendDVT(
+                command,
+                generation: expectedSession.generation
+            )
+            try validateRecoveryOwnership(ownership)
+            guard candidateIdentity.leaseID == lease.id else {
+                throw DeviceLocationError.staleGeneration
+            }
+            guard reply.requestID == command.requestID else {
+                throw DeviceLocationError.responseMismatch
+            }
+
+            tunnelLease = lease
+            transportGeneration = candidateIdentity.generation
+            dvtHandle = candidateIdentity.dvtHandle
+            diagnosticLogger.record(
+                .info,
+                category: "transport",
+                event: "transport.recovery_succeeded",
+                metadata: recoveryMetadata(
+                    command: command,
+                    transportGeneration: candidateIdentity.generation,
+                    attempt: 1
+                )
+            )
+            return reply
+        } catch {
+            if let candidateLease {
+                if candidateDVTStarted {
+                    try? await boundary.shutdownDVT(
+                        generation: expectedSession.generation
+                    )
+                }
+                try? await boundary.stopTunnel(candidateLease)
+            }
+            diagnosticLogger.record(
+                .error,
+                category: "transport",
+                event: "transport.recovery_failed",
+                metadata: recoveryMetadata(
+                    command: command,
+                    transportGeneration: oldTransportGeneration,
+                    attempt: 1
+                )
+            )
+            if recoveryOwnershipEpoch != ownership.epoch
+                || session != expectedSession
+                || generation != expectedSession.generation
+            {
+                throw DeviceLocationError.staleGeneration
+            }
+            throw error
+        }
+    }
+
+    private func validateRecoveryOwnership(
+        _ ownership: RecoveryOwnership
+    ) throws {
+        guard recoveryOwnershipEpoch == ownership.epoch,
+              session?.device.id == ownership.deviceID,
+              session?.generation == ownership.logicalGeneration,
+              generation == ownership.logicalGeneration,
+              transportGeneration == ownership.oldTransportGeneration,
+              tunnelLease?.id == ownership.oldLeaseID
+        else {
+            throw DeviceLocationError.staleGeneration
+        }
+    }
+
+    private func recoveryMetadata(
+        command: DVTLocationCommand,
+        transportGeneration: DeviceTransportGeneration,
+        attempt: Int
+    ) -> [String: String] {
+        [
+            "requestID": command.requestID.rawValue.uuidString,
+            "logicalGeneration": String(generation.rawValue),
+            "transportGeneration": String(transportGeneration.rawValue),
+            "attempt": String(attempt),
+        ]
+    }
+
+    private func tunnelStatusMetadata(
+        _ status: DeviceTunnelStatus,
+        command: DVTLocationCommand,
+        transportGeneration: DeviceTransportGeneration
+    ) -> [String: String] {
+        var metadata = recoveryMetadata(
+            command: command,
+            transportGeneration: transportGeneration,
+            attempt: 1
+        )
+        metadata["state"] = status.state.rawValue
+        metadata["stderrByteCount"] = String(status.diagnostics.stderrByteCount)
+        if let terminationStatus = status.diagnostics.terminationStatus {
+            metadata["terminationStatus"] = String(terminationStatus)
+        }
+        return metadata
     }
 }
 
@@ -771,6 +1033,12 @@ private actor LivePymobiledeviceBoundary: PymobiledeviceBoundary {
         }.value
     }
 
+    func tunnelStatus(
+        _ lease: DeviceTunnelLease
+    ) async throws -> DeviceTunnelStatus {
+        try await tunnelClient.status(lease)
+    }
+
     func stopTunnel(_ lease: DeviceTunnelLease) async throws {
         try await tunnelClient.stopTunnel(lease)
     }
@@ -942,6 +1210,48 @@ private actor LivePymobiledeviceBoundary: PymobiledeviceBoundary {
         }
         return URL(fileURLWithPath: interpreterPath)
     }
+}
+
+func parseDeviceBackendFailure(
+    _ error: [String: Any]
+) -> DeviceBackendFailure? {
+    guard let rawCode = error["code"] as? String,
+          let code = DeviceBackendFailureCode(rawValue: rawCode),
+          let exceptionType = error["exceptionType"] as? String,
+          !exceptionType.isEmpty
+    else {
+        return nil
+    }
+    return DeviceBackendFailure(
+        code: code,
+        exceptionType: exceptionType,
+        errorNumber: error["errno"] as? Int
+    )
+}
+
+func recordDeviceBackendFailure(
+    _ failure: DeviceBackendFailure,
+    requestID: String,
+    command: String,
+    diagnosticLogger: any DiagnosticLogging
+) {
+    var metadata = [
+        "requestID": requestID,
+        "command": command,
+        "failureCode": failure.code.rawValue,
+        "exceptionType": failure.exceptionType,
+    ]
+    if let errorNumber = failure.errorNumber {
+        metadata["errno"] = String(errorNumber)
+    }
+    diagnosticLogger.record(
+        .error,
+        category: "dvt",
+        event: failure.code == .transportClosed
+            ? "dvt.transport_closed"
+            : "dvt.backend_failure",
+        metadata: metadata
+    )
 }
 
 private final class DVTProcessSession: @unchecked Sendable {
@@ -1125,33 +1435,24 @@ private final class DVTProcessSession: @unchecked Sendable {
             )
         }
         guard success else {
-            let error = response["error"] as? [String: Any]
-            let code = error?["code"] as? String
-            let errorMessage = error?["message"] as? String
-            let backendDetail = error?["detail"] as? String
-            diagnosticLogger.record(
-                .error,
-                category: "dvt",
-                event: "request.failed",
-                metadata: [
-                    "requestID": requestIDString,
-                    "command": message["command"] as? String ?? "unknown",
-                    "code": code ?? "unknown",
-                    "message": errorMessage ?? "DVT location request failed",
-                    "detail": backendDetail ?? "none",
-                ]
+            guard let error = response["error"] as? [String: Any],
+                  let failure = parseDeviceBackendFailure(error)
+            else {
+                throw DeviceLocationError.helperFailure(
+                    "DVT helper returned an invalid failure"
+                )
+            }
+            recordDeviceBackendFailure(
+                failure,
+                requestID: requestIDString,
+                command: message["command"] as? String ?? "unknown",
+                diagnosticLogger: diagnosticLogger
             )
-            let failureMessage = [
-                errorMessage,
-                code,
-                backendDetail,
-            ]
-            .compactMap { $0 }
-            .joined(separator: " · ")
+            if failure.code == .transportClosed {
+                throw DeviceLocationError.transportClosed(failure)
+            }
             throw DeviceLocationError.helperFailure(
-                failureMessage.isEmpty
-                    ? "DVT location request failed"
-                    : failureMessage
+                "DVT location request failed"
             )
         }
         diagnosticLogger.record(
@@ -1208,12 +1509,11 @@ private final class DVTProcessSession: @unchecked Sendable {
                 readableHandle.readabilityHandler = nil
                 return
             }
-            let text = String(decoding: data, as: UTF8.self)
             diagnosticLogger.record(
                 .warning,
                 category: "dvt",
                 event: "helper.stderr",
-                metadata: ["message": text]
+                metadata: ["stderrByteCount": String(data.count)]
             )
         }
     }
@@ -1264,10 +1564,17 @@ private struct LiveTunnelLeaseSnapshot: Decodable {
         let port: UInt16
     }
 
+    struct Diagnostics: Decodable {
+        let terminationStatus: Int32?
+        let stderrTail: String
+        let stderrByteCount: Int
+    }
+
     let leaseID: LeaseID
     let deviceID: DeviceIdentifier
     let endpoint: Endpoint
     let state: String
+    let diagnostics: Diagnostics
 }
 
 private struct LiveReconcileReport: Decodable {
@@ -1342,6 +1649,38 @@ private actor LiveTunnelClient {
                 withReply: reply
             )
         }
+    }
+
+    func status(_ lease: DeviceTunnelLease) async throws -> DeviceTunnelStatus {
+        let snapshot: LiveTunnelLeaseSnapshot = try await request { proxy, reply in
+            proxy.status(
+                leaseID: lease.id.rawValue,
+                withReply: reply
+            )
+        }
+        guard snapshot.leaseID.rawValue == lease.id.rawValue,
+              snapshot.deviceID.rawValue == lease.deviceID.rawValue,
+              let state = DeviceTunnelLeaseState(rawValue: snapshot.state),
+              snapshot.diagnostics.stderrByteCount >= 0
+        else {
+            throw DeviceLocationError.tunnelFailure(
+                "Tunnel helper returned an invalid status"
+            )
+        }
+        return DeviceTunnelStatus(
+            leaseID: lease.id,
+            deviceID: lease.deviceID,
+            endpoint: DeviceTunnelEndpoint(
+                address: snapshot.endpoint.address,
+                port: Int(snapshot.endpoint.port)
+            ),
+            state: state,
+            diagnostics: DeviceTunnelDiagnostics(
+                terminationStatus: snapshot.diagnostics.terminationStatus,
+                stderrTail: snapshot.diagnostics.stderrTail,
+                stderrByteCount: snapshot.diagnostics.stderrByteCount
+            )
+        )
     }
 
     func reconcile() async throws {

@@ -2,11 +2,96 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import json
 import math
 import sys
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from typing import Any, Protocol, TextIO
+
+
+_TRANSPORT_ERRNOS = frozenset(
+    {
+        errno.ENETDOWN,
+        errno.ENETUNREACH,
+        errno.EHOSTUNREACH,
+        errno.ECONNABORTED,
+        errno.ECONNRESET,
+        errno.ENOTCONN,
+        errno.EPIPE,
+    }
+)
+_TRANSPORT_EXCEPTION_TYPES = (ConnectionResetError, BrokenPipeError, EOFError)
+_MAX_ERROR_DETAIL_LENGTH = 2048
+
+
+@dataclass(frozen=True)
+class BackendFailure:
+    code: str
+    exception_type: str
+    error_number: int | None
+
+
+def classify_backend_failure(error: BaseException) -> BackendFailure:
+    """Classify a backend failure using only typed exception-chain data."""
+    pending = [error]
+    visited: set[int] = set()
+
+    while pending:
+        current = pending.pop()
+        identity = id(current)
+        if identity in visited:
+            continue
+        visited.add(identity)
+
+        error_number = getattr(current, "errno", None)
+        typed_error_number = (
+            error_number
+            if isinstance(error_number, int) and not isinstance(error_number, bool)
+            else None
+        )
+        if (
+            type(current).__name__ == "ConnectionTerminatedError"
+            or isinstance(current, _TRANSPORT_EXCEPTION_TYPES)
+            or typed_error_number in _TRANSPORT_ERRNOS
+        ):
+            return BackendFailure(
+                code="transport-closed",
+                exception_type=type(current).__name__,
+                error_number=typed_error_number,
+            )
+
+        cause = current.__cause__
+        context = current.__context__
+        if context is not None:
+            pending.append(context)
+        if cause is not None:
+            pending.append(cause)
+
+    return BackendFailure(
+        code="backend-failure",
+        exception_type=type(error).__name__,
+        error_number=_typed_errno(error),
+    )
+
+
+def _typed_errno(error: BaseException) -> int | None:
+    error_number = getattr(error, "errno", None)
+    if isinstance(error_number, int) and not isinstance(error_number, bool):
+        return error_number
+    return None
+
+
+def _bounded_exception_detail(error: BaseException) -> str:
+    try:
+        message = str(error)
+    except Exception:
+        message = ""
+    detail = type(error).__name__
+    if message:
+        detail += f": {message}"
+    return detail[:_MAX_ERROR_DETAIL_LENGTH]
 
 
 class LocationBackend(Protocol):
@@ -56,14 +141,21 @@ class ProtocolProcessor:
         except ValueError:
             return self._error(request_id, "invalid-coordinate", "座標超出合法範圍"), False
         except Exception as error:
-            detail = f"{type(error).__name__}: {error}"[:2048]
+            failure = classify_backend_failure(error)
+            detail = _bounded_exception_detail(error)
+            error_fields: dict[str, Any] = {
+                "exceptionType": failure.exception_type,
+            }
+            if failure.error_number is not None:
+                error_fields["errno"] = failure.error_number
             sys.stderr.write(
                 json.dumps(
                     {
-                        "event": "backend-failure",
+                        "event": failure.code,
                         "requestID": request_id,
                         "command": command,
                         "detail": detail,
+                        **error_fields,
                     },
                     ensure_ascii=False,
                     separators=(",", ":"),
@@ -73,9 +165,14 @@ class ProtocolProcessor:
             sys.stderr.flush()
             return self._error(
                 request_id,
-                "backend-failure",
-                "DVT location request 失敗",
+                failure.code,
+                (
+                    "DVT transport 已中斷"
+                    if failure.code == "transport-closed"
+                    else "DVT location request 失敗"
+                ),
                 detail,
+                error_fields,
             ), False
 
         return {"requestID": request_id, "ok": True}, command == "shutdown"
@@ -95,10 +192,13 @@ class ProtocolProcessor:
         code: str,
         message: str,
         detail: str | None = None,
+        fields: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        error: dict[str, str] = {"code": code, "message": message}
+        error: dict[str, Any] = {"code": code, "message": message}
         if detail is not None:
             error["detail"] = detail
+        if fields is not None:
+            error.update(fields)
         return {"requestID": request_id, "ok": False, "error": error}
 
 

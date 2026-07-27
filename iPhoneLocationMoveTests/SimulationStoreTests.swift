@@ -166,6 +166,105 @@ final class SimulationStoreTests: XCTestCase {
         )
     }
 
+    func testRecoveryPendingKeepsSingleInflightSessionAndConfirmedProgress() async throws {
+        let harness = try SimulationHarness()
+        try await harness.store.startRoute(
+            preview: route(),
+            speedKilometersPerHour: 4.5,
+            roundTrip: false,
+            riskAccepted: true
+        )
+        let sessionID = try XCTUnwrap(harness.store.activeSessionID)
+        await harness.device.enqueue(.suspended)
+        await harness.device.enqueue(.suspended)
+
+        try harness.store.tick(at: 4)
+        await harness.device.waitForSetCount(2)
+        try harness.store.tick(at: 5)
+        try harness.store.tick(at: 6)
+
+        let maximumConcurrentCalls = await harness.device.maximumConcurrentCalls()
+        XCTAssertEqual(maximumConcurrentCalls, 1)
+        XCTAssertEqual(harness.store.activeSessionID, sessionID)
+        XCTAssertEqual(harness.store.routeSnapshot?.confirmedDistance, 0)
+        XCTAssertEqual(harness.store.routeSnapshot?.phase, .running)
+
+        await harness.device.completeNextSuspended()
+        await harness.device.waitForSetCount(3)
+        await eventually {
+            harness.store.routeSnapshot?.confirmedDistance == 5
+        }
+
+        XCTAssertEqual(harness.store.activeSessionID, sessionID)
+        XCTAssertEqual(harness.store.routeSnapshot?.phase, .running)
+        XCTAssertEqual(harness.store.routeSnapshot?.confirmedDistance, 5)
+        await harness.device.completeNextSuspended()
+    }
+
+    func testSetRecoveryExhaustionInterruptsWithUnknownPosition() async throws {
+        let harness = try SimulationHarness()
+        try await harness.store.startRoute(
+            preview: route(),
+            speedKilometersPerHour: 4.5,
+            roundTrip: false,
+            riskAccepted: true
+        )
+        let sessionID = try XCTUnwrap(harness.store.activeSessionID)
+        await harness.device.enqueue(.suspended)
+        try harness.store.tick(at: 4)
+        await harness.device.waitForSetCount(2)
+
+        await harness.device.failNextSuspended(
+            .transportFailure("one-shot recovery exhausted")
+        )
+
+        await eventually { harness.store.routeSnapshot?.phase == .interrupted }
+        XCTAssertEqual(harness.store.activeSessionID, sessionID)
+        XCTAssertEqual(
+            harness.store.routeSnapshot?.interruption,
+            DeviceInterruption(
+                reason: .transportFailure,
+                positionKnowledge: .unknown
+            )
+        )
+        guard case let .route(_, failure) = harness.store.state else {
+            return XCTFail("Expected interrupted route state")
+        }
+        XCTAssertEqual(failure, .transportFailure("one-shot recovery exhausted"))
+    }
+
+    func testClearRecoveryFailureKeepsCleanupOwnershipAndRetryClear() async throws {
+        for failure in [
+            DeviceLocationError.transportFailure("rebuild failed"),
+            .transportFailure("clear replay failed"),
+        ] {
+            let harness = try SimulationHarness()
+            await harness.store.confirmPoint(
+                try DeviceCoordinate(latitude: 25, longitude: 121),
+                riskAccepted: true
+            )
+            let sessionID = try XCTUnwrap(harness.store.activeSessionID)
+            await harness.device.enqueueClearFailure(failure)
+
+            await harness.store.stop()
+
+            guard case let .stopping(stoppingSessionID, recordedFailure?) =
+                harness.store.state
+            else {
+                return XCTFail("Expected stopping cleanup ownership")
+            }
+            XCTAssertEqual(stoppingSessionID, sessionID)
+            XCTAssertEqual(recordedFailure, failure)
+            XCTAssertEqual(harness.store.activeSessionID, sessionID)
+
+            await harness.store.stop()
+            XCTAssertEqual(harness.store.state, .idle)
+            XCTAssertNil(harness.store.activeSessionID)
+            let clearCallCount = await harness.device.recordedClearCallCount()
+            XCTAssertEqual(clearCallCount, 2)
+        }
+    }
+
     func testPauseDuringInflightCorrectsSnapshotAndNoInflightPauseSendsNothing() async throws {
         let inflight = try SimulationHarness()
         try await inflight.store.startRoute(
@@ -322,6 +421,16 @@ final class SimulationStoreTests: XCTestCase {
             (.timeout, .timeout),
             (.helperFailure("exited"), .helperExited),
             (.tunnelFailure("ended"), .tunnelEnded),
+            (
+                .transportClosed(
+                    DeviceBackendFailure(
+                        code: .transportClosed,
+                        exceptionType: "ConnectionTerminatedError",
+                        errorNumber: 54
+                    )
+                ),
+                .transportFailure
+            ),
         ]
         for (failure, reason) in cases {
             let harness = try SimulationHarness()

@@ -88,6 +88,12 @@ struct TunnelEndpoint: Equatable, Codable {
     }
 }
 
+struct TunnelProcessDiagnostics: Equatable, Codable {
+    let terminationStatus: Int32?
+    let stderrTail: String
+    let stderrByteCount: Int
+}
+
 struct TunnelLeaseSnapshot: Equatable, Codable {
     enum State: String, Codable {
         case running
@@ -98,6 +104,7 @@ struct TunnelLeaseSnapshot: Equatable, Codable {
     let deviceID: DeviceID
     let endpoint: TunnelEndpoint
     let state: State
+    let diagnostics: TunnelProcessDiagnostics
 }
 
 struct ReconcileReport: Equatable, Codable {
@@ -822,6 +829,7 @@ protocol TunnelProcessControlling: AnyObject {
     var processIdentifier: Int32 { get }
     var isRunning: Bool { get }
     var terminationStatus: Int32? { get }
+    var diagnostics: TunnelProcessDiagnostics { get }
     func readEndpointLine() throws -> String
     func stop() throws
 }
@@ -833,13 +841,78 @@ protocol TunnelProcessLaunching {
     ) throws -> TunnelProcessControlling
 }
 
+private final class StderrCollector: @unchecked Sendable {
+    private static let tailLimit = 4_096
+
+    private let input: FileHandle
+    private let lock = NSLock()
+    private let drainGroup = DispatchGroup()
+    private var tail = Data()
+    private var byteCount = 0
+
+    init(input: FileHandle) {
+        self.input = input
+    }
+
+    func start() {
+        drainGroup.enter()
+        DispatchQueue.global(qos: .utility).async { [self] in
+            defer { drainGroup.leave() }
+            while true {
+                do {
+                    guard let data = try input.read(upToCount: 16_384), !data.isEmpty else {
+                        return
+                    }
+                    append(data)
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    func snapshot(waitForEOF: Bool) -> (tail: String, byteCount: Int) {
+        if waitForEOF {
+            _ = drainGroup.wait(timeout: .now() + 1)
+        }
+        return lock.withLock {
+            (Self.safeUTF8String(from: tail), byteCount)
+        }
+    }
+
+    private func append(_ data: Data) {
+        lock.withLock {
+            if byteCount > Int.max - data.count {
+                byteCount = Int.max
+            } else {
+                byteCount += data.count
+            }
+            tail.append(data)
+            if tail.count > Self.tailLimit {
+                tail.removeFirst(tail.count - Self.tailLimit)
+            }
+        }
+    }
+
+    private static func safeUTF8String(from data: Data) -> String {
+        var value = String(decoding: data, as: UTF8.self)
+        while value.utf8.count > tailLimit {
+            value.removeFirst()
+        }
+        return value
+    }
+}
+
 final class FoundationTunnelProcess: TunnelProcessControlling {
     private let process: Process
     private let output: FileHandle
+    private let stderrCollector: StderrCollector
 
-    init(process: Process, output: FileHandle) {
+    init(process: Process, output: FileHandle, errorOutput: FileHandle) {
         self.process = process
         self.output = output
+        stderrCollector = StderrCollector(input: errorOutput)
+        stderrCollector.start()
     }
 
     var processIdentifier: Int32 {
@@ -852,6 +925,16 @@ final class FoundationTunnelProcess: TunnelProcessControlling {
 
     var terminationStatus: Int32? {
         process.isRunning ? nil : process.terminationStatus
+    }
+
+    var diagnostics: TunnelProcessDiagnostics {
+        let running = process.isRunning
+        let stderr = stderrCollector.snapshot(waitForEOF: !running)
+        return TunnelProcessDiagnostics(
+            terminationStatus: running ? nil : process.terminationStatus,
+            stderrTail: stderr.tail,
+            stderrByteCount: stderr.byteCount
+        )
     }
 
     func readEndpointLine() throws -> String {
@@ -906,6 +989,7 @@ final class FoundationTunnelProcessLauncher: TunnelProcessLaunching {
     ) throws -> TunnelProcessControlling {
         let process = Process()
         let output = Pipe()
+        let errorOutput = Pipe()
         process.executableURL = runtime.executableURL
         process.arguments = [
             "lockdown",
@@ -915,7 +999,7 @@ final class FoundationTunnelProcessLauncher: TunnelProcessLaunching {
             deviceID.rawValue
         ]
         process.standardOutput = output
-        process.standardError = Pipe()
+        process.standardError = errorOutput
         process.environment = Self.processEnvironment
         do {
             try process.run()
@@ -924,7 +1008,8 @@ final class FoundationTunnelProcessLauncher: TunnelProcessLaunching {
         }
         return FoundationTunnelProcess(
             process: process,
-            output: output.fileHandleForReading
+            output: output.fileHandleForReading,
+            errorOutput: errorOutput.fileHandleForReading
         )
     }
 }
@@ -1014,7 +1099,8 @@ final class TunnelLeaseManager: @unchecked Sendable {
                 leaseID: leaseID,
                 deviceID: deviceID,
                 endpoint: endpoint,
-                state: .running
+                state: .running,
+                diagnostics: process.diagnostics
             )
             leasesByID[leaseID] = TunnelLease(
                 key: key,
@@ -1049,14 +1135,11 @@ final class TunnelLeaseManager: @unchecked Sendable {
         try lock.withLock {
             let caller = try verifyCaller(identity)
             let lease = try ownedLease(leaseID, caller: caller.identity)
-            guard lease.process.isRunning else {
+            let snapshot = makeSnapshot(for: lease)
+            if snapshot.state == .exited {
                 removeLease(leaseID)
-                throw TunnelHelperError(
-                    code: .processExited,
-                    detail: "The tunnel process exited with status \(lease.process.terminationStatus ?? -1)."
-                )
             }
-            return lease.snapshot
+            return snapshot
         }
     }
 
@@ -1150,6 +1233,23 @@ final class TunnelLeaseManager: @unchecked Sendable {
             return
         }
         leaseIDsByKey.removeValue(forKey: lease.key)
+    }
+
+    private func makeSnapshot(for lease: TunnelLease) -> TunnelLeaseSnapshot {
+        let diagnostics = lease.process.diagnostics
+        let state: TunnelLeaseSnapshot.State
+        if diagnostics.terminationStatus != nil || !lease.process.isRunning {
+            state = .exited
+        } else {
+            state = .running
+        }
+        return TunnelLeaseSnapshot(
+            leaseID: lease.snapshot.leaseID,
+            deviceID: lease.snapshot.deviceID,
+            endpoint: lease.snapshot.endpoint,
+            state: state,
+            diagnostics: diagnostics
+        )
     }
 }
 

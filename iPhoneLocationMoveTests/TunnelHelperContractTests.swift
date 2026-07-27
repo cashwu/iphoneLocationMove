@@ -69,6 +69,8 @@ private final class FakeTunnelProcess: TunnelProcessControlling {
     let processIdentifier: Int32
     var isRunning: Bool
     var terminationStatus: Int32?
+    var stderrTail: String
+    var stderrByteCount: Int
     var endpointLine: String
     var stopError: TunnelHelperError?
     private(set) var stopCount = 0
@@ -77,12 +79,24 @@ private final class FakeTunnelProcess: TunnelProcessControlling {
         processIdentifier: Int32,
         isRunning: Bool = true,
         terminationStatus: Int32? = nil,
+        stderrTail: String = "",
+        stderrByteCount: Int = 0,
         endpointLine: String = "fd00::1 62078"
     ) {
         self.processIdentifier = processIdentifier
         self.isRunning = isRunning
         self.terminationStatus = terminationStatus
+        self.stderrTail = stderrTail
+        self.stderrByteCount = stderrByteCount
         self.endpointLine = endpointLine
+    }
+
+    var diagnostics: TunnelProcessDiagnostics {
+        TunnelProcessDiagnostics(
+            terminationStatus: terminationStatus,
+            stderrTail: stderrTail,
+            stderrByteCount: stderrByteCount
+        )
     }
 
     func readEndpointLine() throws -> String {
@@ -297,16 +311,128 @@ private func testEndpointAndProcessFailures() throws {
 
     nextProcess = FakeTunnelProcess(processIdentifier: 9)
     nextProcess.stopError = .processStopFailed
+    let recoveryKey = UUID()
     let lease = try manager.startTunnel(
         caller: fixture.identity,
         deviceID: "00008110-001234567890001E",
-        idempotencyKey: UUID()
+        idempotencyKey: recoveryKey
     )
     try expectError(.processStopFailed) {
         try manager.stopTunnel(caller: fixture.identity, leaseID: lease.leaseID)
     }
     let status = try manager.status(caller: fixture.identity, leaseID: lease.leaseID)
     try require(status.state == .running, "Failed stop discarded cleanup ownership")
+    let duplicate = try manager.startTunnel(
+        caller: fixture.identity,
+        deviceID: "00008110-001234567890001E",
+        idempotencyKey: recoveryKey
+    )
+    try require(duplicate.leaseID == lease.leaseID, "Failed stop replaced the existing tunnel lease")
+    try require(launcher.launches.count == 3, "Failed stop launched a second tunnel process")
+}
+
+private func testTunnelStatusSnapshotsAndExitedLeaseRemoval() throws {
+    let fixture = try Fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let process = FakeTunnelProcess(processIdentifier: 10)
+    let launcher = FakeTunnelLauncher { process }
+    let (manager, _, _) = makeManager(fixture: fixture, launcher: launcher)
+    let lease = try manager.startTunnel(
+        caller: fixture.identity,
+        deviceID: "00008110-001234567890001E",
+        idempotencyKey: UUID()
+    )
+
+    try require(lease.state == .running, "Start did not return a running snapshot")
+    try require(lease.diagnostics.terminationStatus == nil, "Running snapshot has a termination status")
+    try require(lease.diagnostics.stderrTail.isEmpty, "Running snapshot has unexpected stderr")
+    try require(lease.diagnostics.stderrByteCount == 0, "Running snapshot has unexpected stderr bytes")
+
+    process.stderrTail = "tunnel route vanished"
+    process.stderrByteCount = process.stderrTail.utf8.count
+    let running = try manager.status(caller: fixture.identity, leaseID: lease.leaseID)
+    try require(running.state == .running, "Live process did not return a running snapshot")
+    try require(
+        running.diagnostics.stderrTail == process.stderrTail,
+        "Running snapshot omitted current stderr diagnostics"
+    )
+    try require(
+        running.diagnostics.stderrByteCount == process.stderrByteCount,
+        "Running snapshot omitted stderr byte count"
+    )
+
+    process.isRunning = false
+    process.terminationStatus = 65
+    let exited = try manager.status(caller: fixture.identity, leaseID: lease.leaseID)
+    try require(exited.state == .exited, "Exited process did not return an exited snapshot")
+    try require(exited.diagnostics.terminationStatus == 65, "Exited snapshot omitted termination status")
+    try require(
+        exited.diagnostics.stderrTail == process.stderrTail,
+        "Exited snapshot omitted stderr tail"
+    )
+    try require(
+        exited.diagnostics.stderrByteCount == process.stderrByteCount,
+        "Exited snapshot omitted stderr byte count"
+    )
+    try expectError(.unknownLease) {
+        _ = try manager.status(caller: fixture.identity, leaseID: lease.leaseID)
+    }
+}
+
+private func testFoundationProcessContinuouslyDrainsAndBoundsStderr() throws {
+    let fixture = try Fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let executableURL = fixture.root.appendingPathComponent("stderr-tunnel")
+    let prefix = "stderr-prefix-"
+    let bodyByteCount = 100_000
+    let suffix = "-LATEST-TAIL-MARKER"
+    let script = """
+    #!/usr/bin/python3 -Es
+    import sys
+    sys.stdout.write("fd00::1 62078\\n")
+    sys.stdout.flush()
+    payload = b"\(prefix)" + (b"x" * \(bodyByteCount)) + b"\(suffix)"
+    sys.stderr.buffer.write(payload)
+    sys.stderr.buffer.flush()
+    raise SystemExit(23)
+
+    """
+    try Data(script.utf8).write(to: executableURL)
+    guard chmod(executableURL.path, 0o700) == 0 else {
+        throw HarnessFailure.assertion("Unable to make stderr fixture executable")
+    }
+
+    let process = try FoundationTunnelProcessLauncher().launch(
+        runtime: InstalledTunnelRuntime(rootURL: fixture.root, executableURL: executableURL),
+        deviceID: try DeviceID(validating: "00008110-001234567890001E")
+    )
+    _ = try process.readEndpointLine()
+
+    let deadline = Date().addingTimeInterval(5)
+    while process.isRunning, Date() < deadline {
+        usleep(10_000)
+    }
+    defer { try? process.stop() }
+    try require(
+        !process.isRunning,
+        "Tunnel process remained blocked after writing stderr; stderr was not continuously drained"
+    )
+
+    let diagnostics = process.diagnostics
+    let expectedByteCount = prefix.utf8.count + bodyByteCount + suffix.utf8.count
+    try require(
+        diagnostics.stderrByteCount == expectedByteCount,
+        "stderr byte count was \(diagnostics.stderrByteCount), expected \(expectedByteCount)"
+    )
+    try require(
+        diagnostics.stderrTail.utf8.count <= 4_096,
+        "stderr tail exceeded the 4 KiB contract"
+    )
+    try require(
+        diagnostics.stderrTail.hasSuffix(suffix),
+        "stderr tail did not retain the newest process output"
+    )
+    try require(diagnostics.terminationStatus == 23, "Process termination status was not captured")
 }
 
 private func testLaunchEnvironmentProvidesRequiredSystemTools() throws {
@@ -554,6 +680,10 @@ private enum TunnelHelperHarness {
                 try testDeviceIdentityOwnershipAndIdempotency()
             case "process":
                 try testEndpointAndProcessFailures()
+            case "status-diagnostics":
+                try testTunnelStatusSnapshotsAndExitedLeaseRemoval()
+            case "stderr-drain":
+                try testFoundationProcessContinuouslyDrainsAndBoundsStderr()
             case "launch-environment":
                 try testLaunchEnvironmentProvidesRequiredSystemTools()
             case "cleanup":
@@ -661,6 +791,14 @@ final class TunnelHelperContractTests: XCTestCase {
 
     func testParsesEndpointAndReportsProcessExitAndStopFailure() throws {
         try run("process")
+    }
+
+    func testReportsRunningAndExitedDiagnosticsThenRemovesExitedLease() throws {
+        try run("status-diagnostics")
+    }
+
+    func testContinuouslyDrainsAndRetainsBoundedStderrTail() throws {
+        try run("stderr-drain")
     }
 
     func testLaunchEnvironmentProvidesRequiredSystemTools() throws {

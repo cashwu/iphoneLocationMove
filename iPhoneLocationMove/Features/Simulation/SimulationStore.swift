@@ -623,6 +623,8 @@ final class SimulationStore: ObservableObject {
             return .helperExited
         case .tunnelFailure:
             return .tunnelEnded
+        case .transportClosed:
+            return .transportFailure
         default:
             return .transportFailure
         }

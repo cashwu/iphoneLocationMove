@@ -44,6 +44,84 @@ struct DeviceSessionGeneration: RawRepresentable, Comparable, Hashable, Sendable
     }
 }
 
+struct DeviceTransportGeneration: RawRepresentable, Comparable, Hashable, Sendable {
+    let rawValue: UInt64
+
+    func advanced() throws -> Self {
+        guard rawValue < UInt64.max else {
+            throw DeviceLocationError.identityExhausted
+        }
+        return Self(rawValue: rawValue + 1)
+    }
+
+    static func < (lhs: Self, rhs: Self) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+}
+
+struct RecoveryOwnershipEpoch: RawRepresentable, Comparable, Hashable, Sendable {
+    let rawValue: UInt64
+
+    func advanced() throws -> Self {
+        guard rawValue < UInt64.max else {
+            throw DeviceLocationError.identityExhausted
+        }
+        return Self(rawValue: rawValue + 1)
+    }
+
+    static func < (lhs: Self, rhs: Self) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+}
+
+struct DeviceDVTSessionHandle: RawRepresentable, Equatable, Hashable, Sendable {
+    let rawValue: UUID
+
+    init() {
+        rawValue = UUID()
+    }
+
+    init(rawValue: UUID) {
+        self.rawValue = rawValue
+    }
+}
+
+struct CandidateTransportIdentity: Equatable, Hashable, Sendable {
+    let generation: DeviceTransportGeneration
+    let leaseID: DeviceTunnelLeaseID
+    let dvtHandle: DeviceDVTSessionHandle
+}
+
+enum DeviceBackendFailureCode: String, Equatable, Hashable, Sendable {
+    case transportClosed = "transport-closed"
+    case backendFailure = "backend-failure"
+}
+
+struct DeviceBackendFailure: Equatable, Hashable, Sendable {
+    let code: DeviceBackendFailureCode
+    let exceptionType: String
+    let errorNumber: Int?
+}
+
+enum DeviceTunnelLeaseState: String, Equatable, Hashable, Sendable {
+    case running
+    case exited
+}
+
+struct DeviceTunnelDiagnostics: Equatable, Hashable, Sendable {
+    let terminationStatus: Int32?
+    let stderrTail: String
+    let stderrByteCount: Int
+}
+
+struct DeviceTunnelStatus: Equatable, Sendable {
+    let leaseID: DeviceTunnelLeaseID
+    let deviceID: DeviceID
+    let endpoint: DeviceTunnelEndpoint
+    let state: DeviceTunnelLeaseState
+    let diagnostics: DeviceTunnelDiagnostics
+}
+
 struct DeviceRequestID: RawRepresentable, Equatable, Hashable, Sendable {
     let rawValue: UUID
 
@@ -201,6 +279,7 @@ enum DeviceLocationError: Error, Equatable, Hashable, Sendable {
     case timeout
     case usbDisconnected
     case authorizationDenied
+    case transportClosed(DeviceBackendFailure)
     case transportFailure(String)
     case helperFailure(String)
     case tunnelFailure(String)
@@ -273,6 +352,13 @@ struct DeviceFailurePresentation: Equatable, Sendable {
                 message: "\(detail)。目前不能宣稱已恢復真實定位，請重試 clear。",
                 recoveryTitle: "重試清除",
                 recoveryAction: .retryClear
+            )
+        case .transportClosed:
+            Self(
+                title: "裝置連線已中斷",
+                message: "DVT transport 已中斷，且自動恢復未完成。",
+                recoveryTitle: "重試",
+                recoveryAction: .retry
             )
         case let .transportFailure(detail):
             Self(
