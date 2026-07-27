@@ -252,6 +252,228 @@ final class LocationMapModelTests: XCTestCase {
         XCTAssertEqual(model.mapSearchGeneration, MapSearchGeneration(rawValue: 0))
     }
 
+    func testMacLocationMarkerDoesNotModifyPreviewEndpointsOrRouteState() throws {
+        let model = try modelWithEndpoints()
+        let request = try model.beginDirections()
+        _ = try model.receiveDirections(
+            .routeAvailable(polyline(), distance: 900),
+            for: request
+        )
+        let preview = model.preview
+        let endpointA = model.endpointA
+        let endpointB = model.endpointB
+        let routePreview = model.routePreview
+        let routeStatus = model.routeStatus
+
+        model.updateMacLocation(
+            coordinate(latitude: 25.05, longitude: 121.55),
+            for: DeviceSessionGeneration(rawValue: 1)
+        )
+
+        XCTAssertEqual(
+            model.macLocationCoordinate,
+            coordinate(latitude: 25.05, longitude: 121.55)
+        )
+        XCTAssertEqual(model.preview, preview)
+        XCTAssertEqual(model.endpointA, endpointA)
+        XCTAssertEqual(model.endpointB, endpointB)
+        XCTAssertEqual(model.routePreview, routePreview)
+        XCTAssertEqual(model.routeStatus, routeStatus)
+    }
+
+    func testFirstMacLocationCreatesInitialCenterIntentWithSessionIdentityOnce() throws {
+        let model = LocationMapModel()
+        let firstCoordinate = coordinate(latitude: 25.05, longitude: 121.55)
+        let firstGeneration = DeviceSessionGeneration(rawValue: 1)
+
+        model.updateMacLocation(firstCoordinate, for: firstGeneration)
+
+        XCTAssertEqual(model.macInitialCenterIntent?.coordinate, firstCoordinate)
+        XCTAssertEqual(model.macInitialCenterIntent?.generation, firstGeneration)
+        let initialIntent = model.macInitialCenterIntent
+
+        model.updateMacLocation(
+            coordinate(latitude: 25.06, longitude: 121.56),
+            for: firstGeneration
+        )
+
+        XCTAssertEqual(model.macInitialCenterIntent, initialIntent)
+    }
+
+    func testSearchInteractionRevokesMacInitialCenterEligibility() throws {
+        let model = LocationMapModel()
+
+        _ = try model.beginSearch(query: "台北車站")
+        model.updateMacLocation(
+            coordinate(latitude: 25.05, longitude: 121.55),
+            for: DeviceSessionGeneration(rawValue: 1)
+        )
+
+        XCTAssertNotNil(model.macLocationCoordinate)
+        XCTAssertNil(model.macInitialCenterIntent)
+    }
+
+    func testMapSelectionRevokesMacInitialCenterEligibility() throws {
+        let model = LocationMapModel()
+
+        try model.selectMapCoordinate(
+            coordinate(latitude: 25.04, longitude: 121.53)
+        )
+        model.updateMacLocation(
+            coordinate(latitude: 25.05, longitude: 121.55),
+            for: DeviceSessionGeneration(rawValue: 1)
+        )
+
+        XCTAssertNotNil(model.macLocationCoordinate)
+        XCTAssertNil(model.macInitialCenterIntent)
+    }
+
+    func testEndpointAndRouteInteractionsRevokeMacInitialCenterEligibility() throws {
+        let endpointModel = LocationMapModel()
+        try endpointModel.selectMapCoordinate(
+            coordinate(latitude: 25.03, longitude: 121.56)
+        )
+        try endpointModel.assignPreview(to: .a)
+        endpointModel.updateMacLocation(
+            coordinate(latitude: 25.05, longitude: 121.55),
+            for: DeviceSessionGeneration(rawValue: 1)
+        )
+
+        XCTAssertNotNil(endpointModel.macLocationCoordinate)
+        XCTAssertNil(endpointModel.macInitialCenterIntent)
+
+        let routeModel = try modelWithEndpoints()
+        _ = try routeModel.beginDirections()
+        routeModel.updateMacLocation(
+            coordinate(latitude: 25.05, longitude: 121.55),
+            for: DeviceSessionGeneration(rawValue: 1)
+        )
+
+        XCTAssertNotNil(routeModel.macLocationCoordinate)
+        XCTAssertNil(routeModel.macInitialCenterIntent)
+    }
+
+    func testManualCameraInteractionRevokesMacInitialCenterEligibility() {
+        let model = LocationMapModel()
+
+        model.recordManualCameraInteraction()
+        model.updateMacLocation(
+            coordinate(latitude: 25.05, longitude: 121.55),
+            for: DeviceSessionGeneration(rawValue: 1)
+        )
+
+        XCTAssertNotNil(model.macLocationCoordinate)
+        XCTAssertNil(model.macInitialCenterIntent)
+    }
+
+    func testReconnectOnlyUpdatesMarkerAfterInitialCenterIntentWasCreated() throws {
+        let model = LocationMapModel()
+        let initialCoordinate = coordinate(latitude: 25.05, longitude: 121.55)
+        let reconnectedCoordinate = coordinate(latitude: 24.15, longitude: 120.68)
+
+        model.updateMacLocation(
+            initialCoordinate,
+            for: DeviceSessionGeneration(rawValue: 1)
+        )
+        let initialIntent = try XCTUnwrap(model.macInitialCenterIntent)
+
+        model.updateMacLocation(
+            reconnectedCoordinate,
+            for: DeviceSessionGeneration(rawValue: 2)
+        )
+
+        XCTAssertEqual(model.macLocationCoordinate, reconnectedCoordinate)
+        XCTAssertEqual(model.macInitialCenterIntent, initialIntent)
+        XCTAssertEqual(
+            model.macInitialCenterIntent?.generation,
+            DeviceSessionGeneration(rawValue: 1)
+        )
+    }
+
+    func testRouteCameraIdentityUsesAcceptedRequestAndSurvivesAnnotationRedraw() throws {
+        let model = try modelWithEndpoints()
+        let firstRequest = try model.beginDirections()
+        _ = try model.receiveDirections(
+            .routeAvailable(polyline(), distance: 900),
+            for: firstRequest
+        )
+
+        XCTAssertEqual(model.routeCameraIdentity, firstRequest.generation)
+
+        model.updateMacLocation(
+            coordinate(latitude: 25.05, longitude: 121.55),
+            for: DeviceSessionGeneration(rawValue: 1)
+        )
+
+        XCTAssertEqual(model.routeCameraIdentity, firstRequest.generation)
+
+        let secondRequest = try model.beginDirections()
+        _ = try model.receiveDirections(
+            .routeAvailable(polyline(), distance: 900),
+            for: secondRequest
+        )
+
+        XCTAssertNotEqual(secondRequest.generation, firstRequest.generation)
+        XCTAssertEqual(model.routeCameraIdentity, secondRequest.generation)
+    }
+
+    func testCameraEffectsApplyEachRouteIdentityOnce() {
+        let effects = LocationMapCameraEffects()
+        let first = RouteRequestGeneration(rawValue: 1)
+        let second = RouteRequestGeneration(rawValue: 2)
+        var applicationCount = 0
+
+        effects.applyRoute(first) {
+            applicationCount += 1
+        }
+        effects.applyRoute(first) {
+            applicationCount += 1
+        }
+        effects.applyRoute(second) {
+            applicationCount += 1
+        }
+
+        XCTAssertEqual(applicationCount, 2)
+    }
+
+    func testProgrammaticCameraChangeIsNotReportedAsManualInteraction() {
+        let effects = LocationMapCameraEffects()
+        var manualInteractionCount = 0
+
+        effects.applyPreview(
+            coordinate(latitude: 25.05, longitude: 121.55)
+        ) {
+            effects.regionWillChange(
+                hasActiveGesture: true,
+                onManualCameraInteraction: {
+                    manualInteractionCount += 1
+                }
+            )
+        }
+
+        XCTAssertEqual(manualInteractionCount, 0)
+    }
+
+    func testActiveUserGestureReportsManualCameraInteraction() {
+        let effects = LocationMapCameraEffects()
+        var manualInteractionCount = 0
+
+        effects.regionWillChange(
+            hasActiveGesture: false,
+            onManualCameraInteraction: {
+                manualInteractionCount += 1
+            }
+        )
+        effects.regionWillChange(
+            hasActiveGesture: true,
+            onManualCameraInteraction: {
+                manualInteractionCount += 1
+            }
+        )
+
+        XCTAssertEqual(manualInteractionCount, 1)
+    }
+
     private func modelWithEndpoints() throws -> LocationMapModel {
         let model = LocationMapModel()
         try model.selectMapCoordinate(

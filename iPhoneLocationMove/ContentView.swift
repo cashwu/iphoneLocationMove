@@ -6,7 +6,11 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             if let setupStore = appDelegate.setupStore {
-                DeviceSetupContentView(store: setupStore)
+                LocationWorkspaceView(
+                    store: setupStore,
+                    macLocationCoordinator:
+                        appDelegate.macLocationCoordinator
+                )
             } else if let configurationFailure = appDelegate.configurationFailure {
                 VStack(spacing: 12) {
                     Image(systemName: "exclamationmark.triangle")
@@ -43,17 +47,32 @@ struct ContentView: View {
     }
 }
 
-struct DeviceSetupContentView: View {
+struct LocationWorkspaceView: View {
     @ObservedObject var store: DeviceSetupStore
+    @ObservedObject var macLocationCoordinator: MacLocationCoordinator
 
     var body: some View {
         VStack(spacing: 0) {
             DeviceSetupView(store: store)
             Divider()
             LocationMapView(
-                simulationStore: store.simulationStore
+                simulationStore: store.simulationStore,
+                macLocationCoordinator: macLocationCoordinator
             )
         }
+        .onAppear {
+            macLocationCoordinator.updateReadyGeneration(readyGeneration)
+        }
+        .onChange(of: readyGeneration) { generation in
+            macLocationCoordinator.updateReadyGeneration(generation)
+        }
+    }
+
+    private var readyGeneration: DeviceSessionGeneration? {
+        guard case .ready(let session) = store.state else {
+            return nil
+        }
+        return session.generation
     }
 }
 

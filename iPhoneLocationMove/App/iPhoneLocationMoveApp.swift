@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let lifecycleCoordinator = AppLifecycleCoordinator()
     let sleepObserver = SystemSleepObserver()
     let riskNoticeStore = RiskNoticeStore()
+    let macLocationCoordinator = MacLocationCoordinator()
     @Published private(set) var setupStore: DeviceSetupStore?
     @Published private(set) var configurationFailure: String?
     private var terminationRequestInProgress = false

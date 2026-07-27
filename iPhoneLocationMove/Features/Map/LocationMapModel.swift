@@ -91,6 +91,11 @@ struct DirectionsRequest: Equatable, Sendable {
     let snapshot: MapEndpointSnapshot
 }
 
+struct MacInitialCenterIntent: Equatable, Sendable {
+    let coordinate: MapCoordinate
+    let generation: DeviceSessionGeneration
+}
+
 enum PedestrianDirectionsResponse: Equatable, Sendable {
     case routeAvailable([MapCoordinate], distance: Double)
     case noPedestrianRoute
@@ -187,6 +192,9 @@ final class LocationMapModel: ObservableObject {
     @Published private(set) var endpointB: MapSearchPlace?
     @Published private(set) var routePreview: MapRoutePreview?
     @Published private(set) var routeStatus: MapRouteStatus = .idle
+    @Published private(set) var macLocationCoordinate: MapCoordinate?
+    @Published private(set) var macInitialCenterIntent: MacInitialCenterIntent?
+    @Published private(set) var routeCameraIdentity: RouteRequestGeneration?
     @Published private(set) var walkingSpeedKilometersPerHour: Double
     @Published private(set) var mapSearchGeneration = MapSearchGeneration(
         rawValue: 0
@@ -197,6 +205,7 @@ final class LocationMapModel: ObservableObject {
 
     private var activeSearchRequest: MapSearchRequest?
     private var activeDirectionsRequest: DirectionsRequest?
+    private var userHasMapContext = false
 
     init() {
         walkingSpeedKilometersPerHour = Self.defaultWalkingSpeed
@@ -241,6 +250,7 @@ final class LocationMapModel: ObservableObject {
             throw LocationMapError.invalidSearchQuery
         }
 
+        recordUserMapContext()
         try advanceSearchOwnership()
         preview = nil
         searchResults = []
@@ -285,6 +295,7 @@ final class LocationMapModel: ObservableObject {
     func selectMapCoordinate(
         _ coordinate: MapCoordinate
     ) throws -> MapPreviewAddressRequest {
+        recordUserMapContext()
         try advanceSearchOwnership()
         preview = MapSearchPlace(coordinate: coordinate, address: nil)
         searchResults = []
@@ -313,6 +324,7 @@ final class LocationMapModel: ObservableObject {
     }
 
     func clearSearch() throws {
+        recordUserMapContext()
         try advanceSearchOwnership()
         preview = nil
         searchResults = []
@@ -323,6 +335,7 @@ final class LocationMapModel: ObservableObject {
         guard let preview else {
             throw LocationMapError.missingPreview
         }
+        recordUserMapContext()
         let nextGeneration = try routeRequestGeneration.advanced()
         switch endpoint {
         case .a:
@@ -347,6 +360,7 @@ final class LocationMapModel: ObservableObject {
             throw LocationMapError.endpointsMustDiffer
         }
 
+        recordUserMapContext()
         routeRequestGeneration = try routeRequestGeneration.advanced()
         let request = DirectionsRequest(
             generation: routeRequestGeneration,
@@ -354,6 +368,7 @@ final class LocationMapModel: ObservableObject {
         )
         activeDirectionsRequest = request
         routePreview = nil
+        routeCameraIdentity = nil
         routeStatus = .loading(endpointSnapshot)
         return request
     }
@@ -391,18 +406,21 @@ final class LocationMapModel: ObservableObject {
                 distance: distance,
                 speedKilometersPerHour: walkingSpeedKilometersPerHour
             )
+            routeCameraIdentity = request.generation
             routeStatus = .routeAvailable
             return .routeAvailable
 
         case .noPedestrianRoute:
             activeDirectionsRequest = nil
             routePreview = nil
+            routeCameraIdentity = nil
             routeStatus = .noPedestrianRoute
             return .noPedestrianRoute
 
         case .cancelled:
             activeDirectionsRequest = nil
             routePreview = nil
+            routeCameraIdentity = nil
             routeStatus = .cancelled
             return .cancelled
 
@@ -412,6 +430,7 @@ final class LocationMapModel: ObservableObject {
                 in: .whitespacesAndNewlines
             )
             routePreview = nil
+            routeCameraIdentity = nil
             routeStatus = .transientFailure(
                 message: normalizedMessage.isEmpty
                     ? "暫時無法取得步行路線"
@@ -443,6 +462,24 @@ final class LocationMapModel: ObservableObject {
         }
     }
 
+    func updateMacLocation(
+        _ coordinate: MapCoordinate,
+        for generation: DeviceSessionGeneration
+    ) {
+        macLocationCoordinate = coordinate
+        guard macInitialCenterIntent == nil, !userHasMapContext else {
+            return
+        }
+        macInitialCenterIntent = MacInitialCenterIntent(
+            coordinate: coordinate,
+            generation: generation
+        )
+    }
+
+    func recordManualCameraInteraction() {
+        recordUserMapContext()
+    }
+
     private static func isValidSpeed(_ speed: Double) -> Bool {
         speed.isFinite && walkingSpeedRange.contains(speed)
     }
@@ -457,6 +494,12 @@ final class LocationMapModel: ObservableObject {
         routeRequestGeneration = nextGeneration
         activeDirectionsRequest = nil
         routePreview = nil
+        routeCameraIdentity = nil
         routeStatus = .idle
+    }
+
+    private func recordUserMapContext() {
+        userHasMapContext = true
+        macInitialCenterIntent = nil
     }
 }

@@ -24,6 +24,8 @@
     <string>$(MACOSX_DEPLOYMENT_TARGET)</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>NSLocationUsageDescription</key>
+    <string>使用 Mac 目前位置設定地圖初始視角，不會讀取或變更 iPhone 位置。</string>
     <key>SMPrivilegedExecutables</key>
     <dict>
         <key>com.cash.iPhoneLocationMoveTunnelHelper</key>

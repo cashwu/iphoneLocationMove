@@ -3,6 +3,7 @@ import SwiftUI
 
 struct LocationMapView: View {
     @StateObject private var model = LocationMapModel()
+    @ObservedObject private var macLocationCoordinator: MacLocationCoordinator
     private let simulationStore: SimulationStore?
     @State private var query = ""
     @State private var searchRequest: MapSearchRequest?
@@ -11,8 +12,12 @@ struct LocationMapView: View {
     @State private var activeDirections: MKDirections?
     @State private var message: String?
 
-    init(simulationStore: SimulationStore? = nil) {
+    init(
+        simulationStore: SimulationStore? = nil,
+        macLocationCoordinator: MacLocationCoordinator = MacLocationCoordinator()
+    ) {
         self.simulationStore = simulationStore
+        self.macLocationCoordinator = macLocationCoordinator
     }
 
     var body: some View {
@@ -27,8 +32,18 @@ struct LocationMapView: View {
                 endpointA: model.endpointA,
                 endpointB: model.endpointB,
                 route: model.routePreview?.polyline,
-                onCoordinateSelected: selectMapCoordinate
+                routeCameraIdentity: model.routeCameraIdentity,
+                macLocation: model.macLocationCoordinate,
+                macInitialCenterIntent: model.macInitialCenterIntent,
+                onCoordinateSelected: selectMapCoordinate,
+                onManualCameraInteraction: model.recordManualCameraInteraction
             )
+        }
+        .onAppear(perform: synchronizeMacLocation)
+        .onChange(
+            of: macLocationCoordinator.coordinateGeneration
+        ) { _ in
+            synchronizeMacLocation()
         }
     }
 
@@ -54,6 +69,11 @@ struct LocationMapView: View {
 
                 if let message {
                     Text(message)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                if let macLocationMessage = macLocationCoordinator.message {
+                    Text(macLocationMessage)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -491,6 +511,16 @@ struct LocationMapView: View {
     private func show(_ error: Error) {
         message = error.localizedDescription
     }
+
+    private func synchronizeMacLocation() {
+        guard
+            let coordinate = macLocationCoordinator.coordinate,
+            let generation = macLocationCoordinator.coordinateGeneration
+        else {
+            return
+        }
+        model.updateMacLocation(coordinate, for: generation)
+    }
 }
 
 private struct DisconnectedSimulationControls: View {
@@ -913,15 +943,81 @@ private struct AccessibilityIdentifierMarker: NSViewRepresentable {
     }
 }
 
+@MainActor
+final class LocationMapCameraEffects {
+    private var appliedPreviewCoordinate: MapCoordinate?
+    private var appliedRouteCameraIdentity: RouteRequestGeneration?
+    private var appliedMacCenterGeneration: DeviceSessionGeneration?
+    private var isApplyingProgrammaticCamera = false
+
+    func applyPreview(
+        _ coordinate: MapCoordinate,
+        update: () -> Void
+    ) {
+        guard coordinate != appliedPreviewCoordinate else {
+            return
+        }
+        appliedPreviewCoordinate = coordinate
+        applyProgrammatic(update)
+    }
+
+    func applyRoute(
+        _ identity: RouteRequestGeneration,
+        update: () -> Void
+    ) {
+        guard identity != appliedRouteCameraIdentity else {
+            return
+        }
+        appliedRouteCameraIdentity = identity
+        applyProgrammatic(update)
+    }
+
+    func applyMacCenter(
+        _ generation: DeviceSessionGeneration,
+        update: () -> Void
+    ) {
+        guard generation != appliedMacCenterGeneration else {
+            return
+        }
+        appliedMacCenterGeneration = generation
+        applyProgrammatic(update)
+    }
+
+    func regionWillChange(
+        hasActiveGesture: Bool,
+        onManualCameraInteraction: () -> Void
+    ) {
+        guard hasActiveGesture, !isApplyingProgrammaticCamera else {
+            return
+        }
+        onManualCameraInteraction()
+    }
+
+    private func applyProgrammatic(_ update: () -> Void) {
+        isApplyingProgrammaticCamera = true
+        defer {
+            isApplyingProgrammaticCamera = false
+        }
+        update()
+    }
+}
+
 private struct LocationMapCanvas: NSViewRepresentable {
     let preview: MapSearchPlace?
     let endpointA: MapSearchPlace?
     let endpointB: MapSearchPlace?
     let route: [MapCoordinate]?
+    let routeCameraIdentity: RouteRequestGeneration?
+    let macLocation: MapCoordinate?
+    let macInitialCenterIntent: MacInitialCenterIntent?
     let onCoordinateSelected: (MapCoordinate) -> Void
+    let onManualCameraInteraction: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onCoordinateSelected: onCoordinateSelected)
+        Coordinator(
+            onCoordinateSelected: onCoordinateSelected,
+            onManualCameraInteraction: onManualCameraInteraction
+        )
     }
 
     func makeNSView(context: Context) -> MKMapView {
@@ -938,21 +1034,31 @@ private struct LocationMapCanvas: NSViewRepresentable {
 
     func updateNSView(_ mapView: MKMapView, context: Context) {
         context.coordinator.onCoordinateSelected = onCoordinateSelected
+        context.coordinator.onManualCameraInteraction =
+            onManualCameraInteraction
         context.coordinator.update(
             preview: preview,
             endpointA: endpointA,
             endpointB: endpointB,
-            route: route
+            route: route,
+            routeCameraIdentity: routeCameraIdentity,
+            macLocation: macLocation,
+            macInitialCenterIntent: macInitialCenterIntent
         )
     }
 
     final class Coordinator: NSObject, MKMapViewDelegate {
         weak var mapView: MKMapView?
         var onCoordinateSelected: (MapCoordinate) -> Void
-        private var centeredCoordinate: MapCoordinate?
+        var onManualCameraInteraction: () -> Void
+        private let cameraEffects = LocationMapCameraEffects()
 
-        init(onCoordinateSelected: @escaping (MapCoordinate) -> Void) {
+        init(
+            onCoordinateSelected: @escaping (MapCoordinate) -> Void,
+            onManualCameraInteraction: @escaping () -> Void
+        ) {
             self.onCoordinateSelected = onCoordinateSelected
+            self.onManualCameraInteraction = onManualCameraInteraction
         }
 
         @objc
@@ -978,7 +1084,10 @@ private struct LocationMapCanvas: NSViewRepresentable {
             preview: MapSearchPlace?,
             endpointA: MapSearchPlace?,
             endpointB: MapSearchPlace?,
-            route: [MapCoordinate]?
+            route: [MapCoordinate]?,
+            routeCameraIdentity: RouteRequestGeneration?,
+            macLocation: MapCoordinate?,
+            macInitialCenterIntent: MacInitialCenterIntent?
         ) {
             guard let mapView else {
                 return
@@ -989,6 +1098,7 @@ private struct LocationMapCanvas: NSViewRepresentable {
             addAnnotation(preview, title: "預覽")
             addAnnotation(endpointA, title: "A")
             addAnnotation(endpointB, title: "B")
+            addAnnotation(macLocation, title: "Mac 目前位置")
 
             if let route, route.count >= 2 {
                 var coordinates = route.map {
@@ -1002,32 +1112,46 @@ private struct LocationMapCanvas: NSViewRepresentable {
                     count: coordinates.count
                 )
                 mapView.addOverlay(polyline)
-                mapView.setVisibleMapRect(
-                    polyline.boundingMapRect,
-                    edgePadding: NSEdgeInsets(
-                        top: 40,
-                        left: 40,
-                        bottom: 40,
-                        right: 40
-                    ),
-                    animated: true
-                )
-            } else if let preview,
-                      preview.coordinate != centeredCoordinate
+                if let routeCameraIdentity {
+                    cameraEffects.applyRoute(routeCameraIdentity) {
+                        mapView.setVisibleMapRect(
+                            polyline.boundingMapRect,
+                            edgePadding: NSEdgeInsets(
+                                top: 40,
+                                left: 40,
+                                bottom: 40,
+                                right: 40
+                            ),
+                            animated: true
+                        )
+                    }
+                }
+            } else if let preview {
+                cameraEffects.applyPreview(preview.coordinate) {
+                    centerMap(on: preview.coordinate)
+                }
+            } else if preview == nil,
+                      let macInitialCenterIntent
             {
-                centeredCoordinate = preview.coordinate
-                mapView.setRegion(
-                    MKCoordinateRegion(
-                        center: CLLocationCoordinate2D(
-                            latitude: preview.coordinate.latitude,
-                            longitude: preview.coordinate.longitude
-                        ),
-                        latitudinalMeters: 1_500,
-                        longitudinalMeters: 1_500
-                    ),
-                    animated: true
-                )
+                cameraEffects.applyMacCenter(
+                    macInitialCenterIntent.generation
+                ) {
+                    centerMap(on: macInitialCenterIntent.coordinate)
+                }
             }
+        }
+
+        func mapView(
+            _ mapView: MKMapView,
+            regionWillChangeAnimated animated: Bool
+        ) {
+            let hasActiveGesture = mapView.gestureRecognizers.contains {
+                $0.state == .began || $0.state == .changed
+            }
+            cameraEffects.regionWillChange(
+                hasActiveGesture: hasActiveGesture,
+                onManualCameraInteraction: onManualCameraInteraction
+            )
         }
 
         func mapView(
@@ -1075,6 +1199,36 @@ private struct LocationMapCanvas: NSViewRepresentable {
             annotation.title = title
             annotation.subtitle = place.address
             mapView.addAnnotation(annotation)
+        }
+
+        private func addAnnotation(
+            _ coordinate: MapCoordinate?,
+            title: String
+        ) {
+            guard let coordinate, let mapView else {
+                return
+            }
+            let annotation = MKPointAnnotation()
+            annotation.coordinate = CLLocationCoordinate2D(
+                latitude: coordinate.latitude,
+                longitude: coordinate.longitude
+            )
+            annotation.title = title
+            mapView.addAnnotation(annotation)
+        }
+
+        private func centerMap(on coordinate: MapCoordinate) {
+            mapView?.setRegion(
+                MKCoordinateRegion(
+                    center: CLLocationCoordinate2D(
+                        latitude: coordinate.latitude,
+                        longitude: coordinate.longitude
+                    ),
+                    latitudinalMeters: 1_500,
+                    longitudinalMeters: 1_500
+                ),
+                animated: true
+            )
         }
     }
 }
