@@ -63,19 +63,22 @@ final class DeviceSetupStore: ObservableObject {
     private let helperAuthorizer: any TunnelHelperAuthorizing
     private let lifecycleCoordinator: AppLifecycleCoordinator
     private let sleepObserver: SystemSleepObserver
+    private let diagnosticLogger: any DiagnosticLogging
 
     init(
         runtimeManager: any DeviceRuntimeManaging,
         device: any DeviceSessionPreparing,
         helperAuthorizer: any TunnelHelperAuthorizing,
         lifecycleCoordinator: AppLifecycleCoordinator,
-        sleepObserver: SystemSleepObserver
+        sleepObserver: SystemSleepObserver,
+        diagnosticLogger: any DiagnosticLogging = NullDiagnosticLogger()
     ) {
         self.runtimeManager = runtimeManager
         self.device = device
         self.helperAuthorizer = helperAuthorizer
         self.lifecycleCoordinator = lifecycleCoordinator
         self.sleepObserver = sleepObserver
+        self.diagnosticLogger = diagnosticLogger
     }
 
     static func live(
@@ -90,22 +93,47 @@ final class DeviceSetupStore: ObservableObject {
             device: adapter,
             helperAuthorizer: SMJobBlessTunnelHelperAuthorizer(),
             lifecycleCoordinator: lifecycleCoordinator,
-            sleepObserver: sleepObserver
+            sleepObserver: sleepObserver,
+            diagnosticLogger: DiagnosticLogger.shared
         )
     }
 
     func start() async {
+        diagnosticLogger.record(.info, category: "setup", event: "start")
         state = .checkingRuntime
         switch await runtimeManager.inspect() {
         case .ready:
+            diagnosticLogger.record(.info, category: "setup", event: "runtime.ready")
             await continueAfterRuntime()
         case .installationRequired:
+            diagnosticLogger.record(
+                .warning,
+                category: "setup",
+                event: "runtime.installation_required"
+            )
             state = .runtimeInstallationRequired
         case let .pythonUnavailable(minimumVersion):
+            diagnosticLogger.record(
+                .error,
+                category: "setup",
+                event: "runtime.python_unavailable",
+                metadata: ["minimumVersion": minimumVersion]
+            )
             state = .pythonUnavailable(minimumVersion: minimumVersion)
         case .incompleteManagedEnvironment:
+            diagnosticLogger.record(
+                .error,
+                category: "setup",
+                event: "runtime.incomplete"
+            )
             state = .incompleteRuntime
         case let .configurationFailure(failure):
+            diagnosticLogger.record(
+                .error,
+                category: "setup",
+                event: "runtime.configuration_failed",
+                metadata: ["failure": String(describing: failure)]
+            )
             state = .configurationFailure(String(describing: failure))
         }
     }
@@ -146,14 +174,40 @@ final class DeviceSetupStore: ObservableObject {
     }
 
     func requestHelperApproval() async {
+        diagnosticLogger.record(
+            .info,
+            category: "setup",
+            event: "helper_approval.requested"
+        )
         switch await helperAuthorizer.requestApproval() {
         case .enabled:
+            diagnosticLogger.record(
+                .info,
+                category: "setup",
+                event: "helper_approval.enabled"
+            )
             await connect()
         case .approvalRequired:
+            diagnosticLogger.record(
+                .warning,
+                category: "setup",
+                event: "helper_approval.required"
+            )
             state = .helperApprovalRequired
         case .requiresSystemApproval:
+            diagnosticLogger.record(
+                .warning,
+                category: "setup",
+                event: "helper_approval.system_required"
+            )
             state = .helperRequiresSystemApproval
         case let .unavailable(message):
+            diagnosticLogger.record(
+                .error,
+                category: "setup",
+                event: "helper_approval.unavailable",
+                metadata: ["message": message]
+            )
             state = .configurationFailure(message)
         }
     }
@@ -180,6 +234,12 @@ final class DeviceSetupStore: ObservableObject {
     }
 
     private func connect(selectedDeviceID: DeviceID? = nil) async {
+        diagnosticLogger.record(
+            .info,
+            category: "setup",
+            event: "device.connect_started",
+            metadata: ["explicitSelection": String(selectedDeviceID != nil)]
+        )
         state = selectedDeviceID == nil
             ? .discoveringDevices
             : .preparing(nil)
@@ -189,7 +249,8 @@ final class DeviceSetupStore: ObservableObject {
             )
             let simulation = SimulationStore(
                 device: device,
-                generation: session.generation
+                generation: session.generation,
+                diagnosticLogger: diagnosticLogger
             )
             simulationStore = simulation
             lifecycleCoordinator.configure(
@@ -198,9 +259,32 @@ final class DeviceSetupStore: ObservableObject {
             )
             sleepObserver.setHandler(simulation)
             state = .ready(session)
+            diagnosticLogger.record(
+                .info,
+                category: "setup",
+                event: "device.ready",
+                metadata: [
+                    "generation": String(session.generation.rawValue),
+                    "iosMajorVersion": String(
+                        session.device.operatingSystemVersion.majorVersion
+                    ),
+                ]
+            )
         } catch let failure as DeviceLocationError {
+            diagnosticLogger.record(
+                .error,
+                category: "setup",
+                event: "device.connect_failed",
+                metadata: ["failure": String(describing: failure)]
+            )
             await publishDeviceFailure(failure)
         } catch {
+            diagnosticLogger.record(
+                .error,
+                category: "setup",
+                event: "device.connect_failed",
+                metadata: ["failure": error.localizedDescription]
+            )
             state = .failed(.transportFailure(error.localizedDescription))
         }
     }

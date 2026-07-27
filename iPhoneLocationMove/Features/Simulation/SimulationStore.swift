@@ -57,6 +57,7 @@ final class SimulationStore: ObservableObject {
     private let device: any DeviceLocationClient
     private let generation: DeviceSessionGeneration
     private let scheduler: any SimulationScheduling
+    private let diagnosticLogger: any DiagnosticLogging
 
     private(set) var activeSessionID: SimulationSessionID?
     private var routeSession: RouteSession?
@@ -69,11 +70,13 @@ final class SimulationStore: ObservableObject {
     init(
         device: any DeviceLocationClient,
         generation: DeviceSessionGeneration,
-        scheduler: any SimulationScheduling = SystemSimulationScheduler()
+        scheduler: any SimulationScheduling = SystemSimulationScheduler(),
+        diagnosticLogger: any DiagnosticLogging = NullDiagnosticLogger()
     ) {
         self.device = device
         self.generation = generation
         self.scheduler = scheduler
+        self.diagnosticLogger = diagnosticLogger
     }
 
     var routeSnapshot: RouteSimulationSnapshot? {
@@ -95,6 +98,15 @@ final class SimulationStore: ObservableObject {
 
         await prepareForReplacement()
         let sessionID = SimulationSessionID()
+        diagnosticLogger.record(
+            .info,
+            category: "simulation",
+            event: "point.start_requested",
+            metadata: [
+                "sessionID": sessionID.rawValue.uuidString,
+                "generation": String(generation.rawValue),
+            ]
+        )
         state = .starting(mode: .point, sessionID: sessionID)
         do {
             try await device.setLocation(
@@ -111,7 +123,22 @@ final class SimulationStore: ObservableObject {
                     coordinate: coordinate
                 )
             )
+            diagnosticLogger.record(
+                .info,
+                category: "simulation",
+                event: "point.started",
+                metadata: ["sessionID": sessionID.rawValue.uuidString]
+            )
         } catch {
+            diagnosticLogger.record(
+                .error,
+                category: "simulation",
+                event: "point.start_failed",
+                metadata: [
+                    "sessionID": sessionID.rawValue.uuidString,
+                    "failure": String(describing: error),
+                ]
+            )
             publishInitialMutationFailure(error, candidateSessionID: sessionID)
         }
     }
@@ -130,6 +157,17 @@ final class SimulationStore: ObservableObject {
 
         await prepareForReplacement()
         let sessionID = SimulationSessionID()
+        diagnosticLogger.record(
+            .info,
+            category: "simulation",
+            event: "route.start_requested",
+            metadata: [
+                "sessionID": sessionID.rawValue.uuidString,
+                "generation": String(generation.rawValue),
+                "roundTrip": String(roundTrip),
+                "speedKPH": String(speedKilometersPerHour),
+            ]
+        )
         let route = try RouteSession(
             speedKilometersPerHour: speedKilometersPerHour,
             roundTrip: roundTrip
@@ -156,11 +194,35 @@ final class SimulationStore: ObservableObject {
             publishRouteState()
             startProducer(for: sessionID)
             await Task.yield()
+            diagnosticLogger.record(
+                .info,
+                category: "simulation",
+                event: "route.started",
+                metadata: ["sessionID": sessionID.rawValue.uuidString]
+            )
         } catch let routeError as RouteSessionError {
+            diagnosticLogger.record(
+                .error,
+                category: "simulation",
+                event: "route.start_failed",
+                metadata: [
+                    "sessionID": sessionID.rawValue.uuidString,
+                    "failure": String(describing: routeError),
+                ]
+            )
             routeSession = nil
             throw routeError
         } catch {
             let failure = deviceFailure(from: error)
+            diagnosticLogger.record(
+                .error,
+                category: "simulation",
+                event: "route.start_failed",
+                metadata: [
+                    "sessionID": sessionID.rawValue.uuidString,
+                    "failure": String(describing: failure),
+                ]
+            )
             try route.startFailed(reason: interruptionReason(for: failure))
             activeSessionID = sessionID
             state = .interrupted(
@@ -186,6 +248,7 @@ final class SimulationStore: ObservableObject {
         producerTask = nil
         _ = try routeSession.pause()
         publishRouteState()
+        diagnosticLogger.record(.info, category: "simulation", event: "route.paused")
     }
 
     func resume(at instant: TimeInterval) throws {
@@ -196,6 +259,7 @@ final class SimulationStore: ObservableObject {
         lastMonotonicInstant = instant
         publishRouteState()
         startProducer(for: activeSessionID)
+        diagnosticLogger.record(.info, category: "simulation", event: "route.resumed")
     }
 
     func setSpeed(_ speedKilometersPerHour: Double, at instant: TimeInterval) throws {
@@ -208,12 +272,24 @@ final class SimulationStore: ObservableObject {
         )
         lastMonotonicInstant = instant
         publishRouteState()
+        diagnosticLogger.record(
+            .info,
+            category: "simulation",
+            event: "route.speed_changed",
+            metadata: ["speedKPH": String(speedKilometersPerHour)]
+        )
     }
 
     func stop() async {
         guard let sessionID = activeSessionID else {
             return
         }
+        diagnosticLogger.record(
+            .info,
+            category: "simulation",
+            event: "stop_requested",
+            metadata: ["sessionID": sessionID.rawValue.uuidString]
+        )
 
         producerTask?.cancel()
         producerTask = nil
@@ -239,8 +315,23 @@ final class SimulationStore: ObservableObject {
             self.routeSession = nil
             activeSessionID = nil
             state = .idle
+            diagnosticLogger.record(
+                .info,
+                category: "simulation",
+                event: "stopped",
+                metadata: ["sessionID": sessionID.rawValue.uuidString]
+            )
         } catch {
             let failure = deviceFailure(from: error)
+            diagnosticLogger.record(
+                .error,
+                category: "simulation",
+                event: "stop_failed",
+                metadata: [
+                    "sessionID": sessionID.rawValue.uuidString,
+                    "failure": String(describing: failure),
+                ]
+            )
             if let routeSession, routeSession.phase == .stopping {
                 try? routeSession.clearFailed()
             }
@@ -252,6 +343,16 @@ final class SimulationStore: ObservableObject {
         guard let sessionID = activeSessionID else {
             return
         }
+        diagnosticLogger.record(
+            .warning,
+            category: "simulation",
+            event: "device_interrupted",
+            metadata: [
+                "sessionID": sessionID.rawValue.uuidString,
+                "reason": String(describing: interruption.reason),
+                "positionKnowledge": String(describing: interruption.positionKnowledge),
+            ]
+        )
         producerTask?.cancel()
         producerTask = nil
         inFlightToken = nil
@@ -391,6 +492,15 @@ final class SimulationStore: ObservableObject {
             routeResult = .success
         case let .failure(error):
             let typedFailure = deviceFailure(from: error)
+            diagnosticLogger.record(
+                .error,
+                category: "simulation",
+                event: "route.update_failed",
+                metadata: [
+                    "sessionID": sessionID.rawValue.uuidString,
+                    "failure": String(describing: typedFailure),
+                ]
+            )
             failure = typedFailure
             routeResult = .uncertain(interruptionReason(for: typedFailure))
         }

@@ -60,4 +60,4 @@ stdin 與 stdout 使用 UTF-8 newline-delimited JSON。每個 request 都必須�
 {"requestID":"set-1","ok":false,"error":{"code":"invalid-coordinate","message":"座標超出合法範圍"}}
 ```
 
-`error.code` 可能為 `malformed-json`、`invalid-message`、`invalid-request-id`、`unknown-command`、`invalid-coordinate` 或 `backend-failure`。單一 request 失敗不會讓 helper crash；caller 可使用新的 `requestID` 重試。只有 `shutdown` acknowledgement、stdin EOF 或 fatal session error 會結束 process。
+`error.code` 可能為 `malformed-json`、`invalid-message`、`invalid-request-id`、`unknown-command`、`invalid-coordinate` 或 `backend-failure`。`backend-failure` 會在 `error.detail` 提供例外類型與訊息，並將同一筆結構化事件寫入 stderr。單一 request 失敗不會讓 helper crash；caller 可使用新的 `requestID` 重試。只有 `shutdown` acknowledgement、stdin EOF 或 fatal session error 會結束 process。

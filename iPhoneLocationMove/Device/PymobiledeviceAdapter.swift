@@ -95,6 +95,7 @@ private actor DeviceMutationQueue {
 actor PymobiledeviceAdapter: DeviceLocationClient {
     private let boundary: any PymobiledeviceBoundary
     private let mutationQueue = DeviceMutationQueue()
+    private let diagnosticLogger: any DiagnosticLogging
 
     private var generation = DeviceSessionGeneration(rawValue: 0)
     private var runtime: RuntimeInstallation?
@@ -106,8 +107,12 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
     private(set) var state: DeviceSessionState = .disconnected
     private(set) var selectedDevice: USBDevice?
 
-    init(boundary: any PymobiledeviceBoundary) {
+    init(
+        boundary: any PymobiledeviceBoundary,
+        diagnosticLogger: any DiagnosticLogging = NullDiagnosticLogger()
+    ) {
         self.boundary = boundary
+        self.diagnosticLogger = diagnosticLogger
     }
 
     static func live() throws -> PymobiledeviceAdapter {
@@ -117,12 +122,15 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
             configuration: configuration,
             processRunner: processRunner
         )
+        let diagnosticLogger = DiagnosticLogger.shared
         return PymobiledeviceAdapter(
             boundary: LivePymobiledeviceBoundary(
                 runtimeManager: runtimeManager,
                 processRunner: processRunner,
-                tunnelClient: LiveTunnelClient()
-            )
+                tunnelClient: LiveTunnelClient(),
+                diagnosticLogger: diagnosticLogger
+            ),
+            diagnosticLogger: diagnosticLogger
         )
     }
 
@@ -211,6 +219,46 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
         _ coordinate: DeviceCoordinate,
         context: DeviceMutationContext
     ) async throws {
+        diagnosticLogger.record(
+            .debug,
+            category: "device",
+            event: "location.set_requested",
+            metadata: [
+                "requestID": context.requestID.rawValue.uuidString,
+                "sessionID": context.simulationSessionID.rawValue.uuidString,
+                "generation": String(context.generation.rawValue),
+            ]
+        )
+        do {
+            try await performSetLocation(coordinate, context: context)
+            diagnosticLogger.record(
+                .debug,
+                category: "device",
+                event: "location.set_succeeded",
+                metadata: [
+                    "requestID": context.requestID.rawValue.uuidString,
+                    "generation": String(context.generation.rawValue),
+                ]
+            )
+        } catch {
+            diagnosticLogger.record(
+                .error,
+                category: "device",
+                event: "location.set_failed",
+                metadata: [
+                    "requestID": context.requestID.rawValue.uuidString,
+                    "generation": String(context.generation.rawValue),
+                    "failure": String(describing: error),
+                ]
+            )
+            throw error
+        }
+    }
+
+    private func performSetLocation(
+        _ coordinate: DeviceCoordinate,
+        context: DeviceMutationContext
+    ) async throws {
         guard let session else {
             throw DeviceLocationError.usbDisconnected
         }
@@ -239,17 +287,51 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
     }
 
     func clearLocation(context: DeviceCleanupContext) async throws {
-        guard let session else {
-            throw DeviceLocationError.usbDisconnected
+        diagnosticLogger.record(
+            .info,
+            category: "device",
+            event: "location.clear_requested",
+            metadata: [
+                "requestID": context.requestID.rawValue.uuidString,
+                "generation": String(context.generation.rawValue),
+            ]
+        )
+        do {
+            guard let session else {
+                throw DeviceLocationError.usbDisconnected
+            }
+            try await sendClear(context: context, session: session)
+            activeSimulationSessionID = nil
+            diagnosticLogger.record(
+                .info,
+                category: "device",
+                event: "location.clear_succeeded",
+                metadata: ["requestID": context.requestID.rawValue.uuidString]
+            )
+        } catch {
+            diagnosticLogger.record(
+                .error,
+                category: "device",
+                event: "location.clear_failed",
+                metadata: [
+                    "requestID": context.requestID.rawValue.uuidString,
+                    "failure": String(describing: error),
+                ]
+            )
+            throw error
         }
-        try await sendClear(context: context, session: session)
-        activeSimulationSessionID = nil
     }
 
     func shutdown(generation: DeviceSessionGeneration) async {
         guard session?.generation == generation else {
             return
         }
+        diagnosticLogger.record(
+            .info,
+            category: "device",
+            event: "dvt.shutdown_requested",
+            metadata: ["generation": String(generation.rawValue)]
+        )
         try? await boundary.shutdownDVT(generation: generation)
     }
 
@@ -257,6 +339,12 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
         guard selectedDevice?.id == deviceID, let oldSession = session else {
             return
         }
+        diagnosticLogger.record(
+            .warning,
+            category: "device",
+            event: "usb.disconnected",
+            metadata: ["generation": String(oldSession.generation.rawValue)]
+        )
 
         do {
             generation = try generation.advanced()
@@ -290,6 +378,7 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
     }
 
     func teardownForQuit() async throws {
+        diagnosticLogger.record(.info, category: "device", event: "teardown.started")
         if let session, let lease = tunnelLease {
             if activeSimulationSessionID != nil {
                 do {
@@ -314,15 +403,28 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
         disconnectedDeviceID = nil
         activeSimulationSessionID = nil
         state = .disconnected
+        diagnosticLogger.record(.info, category: "device", event: "teardown.completed")
     }
 
     private func prepareSession(
         selectedDeviceID: DeviceID?,
         publishReady: Bool
     ) async throws -> PreparedDeviceSession {
+        diagnosticLogger.record(
+            .info,
+            category: "device",
+            event: "session.prepare_started",
+            metadata: ["explicitSelection": String(selectedDeviceID != nil)]
+        )
         state = .discovering
         let runtime = try await requireRuntime()
         let devices = try await boundary.discoverUSBDevices(runtime: runtime)
+        diagnosticLogger.record(
+            .info,
+            category: "device",
+            event: "usb.discovery_completed",
+            metadata: ["deviceCount": String(devices.count)]
+        )
         let device = try selectDevice(
             from: devices,
             selectedDeviceID: selectedDeviceID
@@ -334,29 +436,73 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
         }
 
         state = .preparing(device: device, stage: .trust)
+        diagnosticLogger.record(.info, category: "device", event: "trust.verify_started")
         try await boundary.verifyTrust(for: device, runtime: runtime)
 
         state = .preparing(device: device, stage: .developerMode)
+        diagnosticLogger.record(
+            .info,
+            category: "device",
+            event: "developer_mode.verify_started"
+        )
         try await boundary.verifyDeveloperMode(for: device, runtime: runtime)
 
         state = .preparing(device: device, stage: .developerDiskImage)
+        diagnosticLogger.record(
+            .info,
+            category: "device",
+            event: "developer_disk_image.prepare_started"
+        )
         try await boundary.prepareDeveloperDiskImage(for: device, runtime: runtime)
 
         let newGeneration = try generation.advanced()
         state = .preparing(device: device, stage: .tunnel)
+        diagnosticLogger.record(
+            .info,
+            category: "device",
+            event: "tunnel.start_requested",
+            metadata: ["generation": String(newGeneration.rawValue)]
+        )
         let lease = try await boundary.startTunnel(
             for: device,
             idempotencyKey: UUID()
         )
+        diagnosticLogger.record(
+            .info,
+            category: "device",
+            event: "tunnel.started",
+            metadata: ["generation": String(newGeneration.rawValue)]
+        )
 
         state = .preparing(device: device, stage: .dvtHelper)
+        diagnosticLogger.record(
+            .info,
+            category: "device",
+            event: "dvt.start_requested",
+            metadata: ["generation": String(newGeneration.rawValue)]
+        )
         do {
             try await boundary.startDVT(
                 runtime: runtime,
                 lease: lease,
                 generation: newGeneration
             )
+            diagnosticLogger.record(
+                .info,
+                category: "device",
+                event: "dvt.started",
+                metadata: ["generation": String(newGeneration.rawValue)]
+            )
         } catch {
+            diagnosticLogger.record(
+                .error,
+                category: "device",
+                event: "dvt.start_failed",
+                metadata: [
+                    "generation": String(newGeneration.rawValue),
+                    "failure": String(describing: error),
+                ]
+            )
             try? await boundary.stopTunnel(lease)
             throw error
         }
@@ -373,6 +519,12 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
         if publishReady {
             state = .ready(prepared)
         }
+        diagnosticLogger.record(
+            .info,
+            category: "device",
+            event: "session.ready",
+            metadata: ["generation": String(newGeneration.rawValue)]
+        )
         return prepared
     }
 
@@ -455,17 +607,20 @@ private actor LivePymobiledeviceBoundary: PymobiledeviceBoundary {
     private let runtimeManager: RuntimeManager
     private let processRunner: any RuntimeProcessRunning
     private let tunnelClient: LiveTunnelClient
+    private let diagnosticLogger: any DiagnosticLogging
     private var dvtSession: DVTProcessSession?
     private var dvtGeneration: DeviceSessionGeneration?
 
     init(
         runtimeManager: RuntimeManager,
         processRunner: any RuntimeProcessRunning,
-        tunnelClient: LiveTunnelClient
+        tunnelClient: LiveTunnelClient,
+        diagnosticLogger: any DiagnosticLogging
     ) {
         self.runtimeManager = runtimeManager
         self.processRunner = processRunner
         self.tunnelClient = tunnelClient
+        self.diagnosticLogger = diagnosticLogger
     }
 
     func inspectRuntime() async -> RuntimeAvailability {
@@ -581,7 +736,8 @@ private actor LivePymobiledeviceBoundary: PymobiledeviceBoundary {
         let session = DVTProcessSession(
             interpreterURL: interpreterURL,
             helperURL: helperURL,
-            endpoint: lease.endpoint
+            endpoint: lease.endpoint,
+            diagnosticLogger: diagnosticLogger
         )
         try await Task.detached {
             try session.start()
@@ -792,20 +948,24 @@ private final class DVTProcessSession: @unchecked Sendable {
     private let interpreterURL: URL
     private let helperURL: URL
     private let endpoint: DeviceTunnelEndpoint
+    private let diagnosticLogger: any DiagnosticLogging
     private let stateLock = NSLock()
     private let inputOutputLock = NSLock()
     private var process: Process?
     private var input: FileHandle?
     private var output: FileHandle?
+    private var errorOutput: FileHandle?
 
     init(
         interpreterURL: URL,
         helperURL: URL,
-        endpoint: DeviceTunnelEndpoint
+        endpoint: DeviceTunnelEndpoint,
+        diagnosticLogger: any DiagnosticLogging
     ) {
         self.interpreterURL = interpreterURL
         self.helperURL = helperURL
         self.endpoint = endpoint
+        self.diagnosticLogger = diagnosticLogger
     }
 
     func start() throws {
@@ -831,6 +991,12 @@ private final class DVTProcessSession: @unchecked Sendable {
             do {
                 try process.run()
             } catch {
+                diagnosticLogger.record(
+                    .error,
+                    category: "dvt",
+                    event: "helper.launch_failed",
+                    metadata: ["failure": error.localizedDescription]
+                )
                 throw DeviceLocationError.helperFailure(
                     "Unable to launch DVT helper: \(error.localizedDescription)"
                 )
@@ -839,6 +1005,9 @@ private final class DVTProcessSession: @unchecked Sendable {
             self.process = process
             input = standardInput.fileHandleForWriting
             output = standardOutput.fileHandleForReading
+            errorOutput = standardError.fileHandleForReading
+            startReadingStandardError(standardError.fileHandleForReading)
+            diagnosticLogger.record(.info, category: "dvt", event: "helper.launched")
             let readyLine = try readLine()
             guard let data = readyLine.data(using: .utf8),
                   let event = try? JSONSerialization.jsonObject(with: data)
@@ -849,10 +1018,18 @@ private final class DVTProcessSession: @unchecked Sendable {
                 self.process = nil
                 input = nil
                 output = nil
+                errorOutput?.readabilityHandler = nil
+                errorOutput = nil
+                diagnosticLogger.record(
+                    .error,
+                    category: "dvt",
+                    event: "helper.not_ready"
+                )
                 throw DeviceLocationError.helperFailure(
                     "DVT helper did not become ready"
                 )
             }
+            diagnosticLogger.record(.info, category: "dvt", event: "helper.ready")
         }
     }
 
@@ -873,6 +1050,15 @@ private final class DVTProcessSession: @unchecked Sendable {
                     "command": "clear",
                 ]
             }
+            diagnosticLogger.record(
+                .debug,
+                category: "dvt",
+                event: "request.sent",
+                metadata: [
+                    "requestID": command.requestID.rawValue.uuidString,
+                    "command": command.name,
+                ]
+            )
             return try exchange(message)
         }
     }
@@ -892,10 +1078,19 @@ private final class DVTProcessSession: @unchecked Sendable {
                 process?.terminate()
             }
             input?.closeFile()
+            errorOutput?.readabilityHandler = nil
+            errorOutput?.closeFile()
             self.process = nil
             input = nil
             output = nil
+            errorOutput = nil
         }
+        diagnosticLogger.record(
+            .info,
+            category: "dvt",
+            event: "helper.stopped",
+            metadata: ["generation": String(generation.rawValue)]
+        )
     }
 
     private func exchange(_ message: [String: Any]) throws -> DVTLocationReply {
@@ -931,11 +1126,40 @@ private final class DVTProcessSession: @unchecked Sendable {
         }
         guard success else {
             let error = response["error"] as? [String: Any]
-            let detail = (error?["message"] as? String)
-                ?? (error?["code"] as? String)
-                ?? "DVT location request failed"
-            throw DeviceLocationError.helperFailure(detail)
+            let code = error?["code"] as? String
+            let errorMessage = error?["message"] as? String
+            let backendDetail = error?["detail"] as? String
+            diagnosticLogger.record(
+                .error,
+                category: "dvt",
+                event: "request.failed",
+                metadata: [
+                    "requestID": requestIDString,
+                    "command": message["command"] as? String ?? "unknown",
+                    "code": code ?? "unknown",
+                    "message": errorMessage ?? "DVT location request failed",
+                    "detail": backendDetail ?? "none",
+                ]
+            )
+            let failureMessage = [
+                errorMessage,
+                code,
+                backendDetail,
+            ]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+            throw DeviceLocationError.helperFailure(
+                failureMessage.isEmpty
+                    ? "DVT location request failed"
+                    : failureMessage
+            )
         }
+        diagnosticLogger.record(
+            .debug,
+            category: "dvt",
+            event: "request.succeeded",
+            metadata: ["requestID": requestIDString]
+        )
         return DVTLocationReply(
             requestID: DeviceRequestID(rawValue: requestUUID)
         )
@@ -974,6 +1198,35 @@ private final class DVTProcessSession: @unchecked Sendable {
             )
         }
         return line
+    }
+
+    private func startReadingStandardError(_ handle: FileHandle) {
+        let diagnosticLogger = self.diagnosticLogger
+        handle.readabilityHandler = { readableHandle in
+            let data = readableHandle.availableData
+            guard !data.isEmpty else {
+                readableHandle.readabilityHandler = nil
+                return
+            }
+            let text = String(decoding: data, as: UTF8.self)
+            diagnosticLogger.record(
+                .warning,
+                category: "dvt",
+                event: "helper.stderr",
+                metadata: ["message": text]
+            )
+        }
+    }
+}
+
+private extension DVTLocationCommand {
+    var name: String {
+        switch self {
+        case .set:
+            "set"
+        case .clear:
+            "clear"
+        }
     }
 }
 

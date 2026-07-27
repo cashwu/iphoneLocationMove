@@ -37,6 +37,8 @@
 		C3102FD1AF4B1E7F759ED3B8 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8E777568830D696D1D18D0D /* ContentView.swift */; };
 		CAEB1F692BECCCE41023D6D5 /* RuntimeManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3F827030D0A13106F2B46DB /* RuntimeManagerTests.swift */; };
 		DAA5D5A513D88CEF3CF17411 /* DisconnectReconnectIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D85D42D9742C16E282411906 /* DisconnectReconnectIntegrationTests.swift */; };
+		D1A600000000000000000002 /* DiagnosticLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A600000000000000000001 /* DiagnosticLogger.swift */; };
+		D1A600000000000000000004 /* DiagnosticLoggerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A600000000000000000003 /* DiagnosticLoggerTests.swift */; };
 		DE6187A6A0C69C354BA935AC /* AppLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88BE49BA668D9D29110B9B5B /* AppLifecycleTests.swift */; };
 		DFB9B81C0AE47F3A9F49D44D /* pymobiledevice3.lock in Resources */ = {isa = PBXBuildFile; fileRef = 1C7D8072741EFD7D6A681120 /* pymobiledevice3.lock */; };
 		E9BD747E6111212036A7050B /* SimulationStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE974F5BA84AC3545A35AB0A /* SimulationStoreTests.swift */; };
@@ -107,6 +109,8 @@
 		C33C39B75F30F97C5FD87F97 /* SystemSleepObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemSleepObserver.swift; sourceTree = "<group>"; };
 		C8C4ECB67326C161E706128F /* tunnel-wheelhouse */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "tunnel-wheelhouse"; path = "iPhoneLocationMoveTunnelHelper/Resources/tunnel-wheelhouse"; sourceTree = SOURCE_ROOT; };
 		D6509171DA5C07B771324165 /* PymobiledeviceAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PymobiledeviceAdapterTests.swift; sourceTree = "<group>"; };
+		D1A600000000000000000001 /* DiagnosticLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticLogger.swift; sourceTree = "<group>"; };
+		D1A600000000000000000003 /* DiagnosticLoggerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticLoggerTests.swift; sourceTree = "<group>"; };
 		D85D42D9742C16E282411906 /* DisconnectReconnectIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisconnectReconnectIntegrationTests.swift; sourceTree = "<group>"; };
 		D8BA53EE3A34DE7EDA38BD17 /* helper.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = helper.py; sourceTree = "<group>"; };
 		DB69C7AAD16E62538F94CB84 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
@@ -191,6 +195,7 @@
 				88BE49BA668D9D29110B9B5B /* AppLifecycleTests.swift */,
 				229985E2E69AB9F9000ECA8F /* AppShellTests.swift */,
 				1891D69959EE82CD27769016 /* ContentViewTests.swift */,
+				D1A600000000000000000003 /* DiagnosticLoggerTests.swift */,
 				F0F938399DFC8422804B8D35 /* DeviceFailurePresentationTests.swift */,
 				1CDBBA81AE3E6BE73470D85C /* DeviceLocationClientTests.swift */,
 				6B633D730DAB0504455DEA1D /* DeviceSetupStoreTests.swift */,
@@ -250,6 +255,7 @@
 			isa = PBXGroup;
 			children = (
 				900C1DF2377C49650214DA8B /* AppLifecycleCoordinator.swift */,
+				D1A600000000000000000001 /* DiagnosticLogger.swift */,
 				1B47024B88A1CC74782D38DE /* iPhoneLocationMoveApp.swift */,
 				71BC154167BB4FBC11520A20 /* RiskNoticeStore.swift */,
 				C33C39B75F30F97C5FD87F97 /* SystemSleepObserver.swift */,
@@ -399,6 +405,7 @@
 			files = (
 				53CFAD6ACEDE2EE082F83BE1 /* AppLifecycleCoordinator.swift in Sources */,
 				C3102FD1AF4B1E7F759ED3B8 /* ContentView.swift in Sources */,
+				D1A600000000000000000002 /* DiagnosticLogger.swift in Sources */,
 				A6E3AC8C343979214018378E /* DeviceLocationClient.swift in Sources */,
 				169D4AE07957A433FE9F7492 /* DeviceRecoveryCoordinator.swift in Sources */,
 				91C8AD0E715CCE757A0292E8 /* DeviceSetupStore.swift in Sources */,
@@ -430,6 +437,7 @@
 				DE6187A6A0C69C354BA935AC /* AppLifecycleTests.swift in Sources */,
 				122F228494002D4F87F549CC /* AppShellTests.swift in Sources */,
 				B4D3E8595FFB87601018AFD7 /* ContentViewTests.swift in Sources */,
+				D1A600000000000000000004 /* DiagnosticLoggerTests.swift in Sources */,
 				A5CC7596CF305F519D458A27 /* DeviceFailurePresentationTests.swift in Sources */,
 				2A86F130158D0A644255AA70 /* DeviceLocationClientTests.swift in Sources */,
 				6F94C46D9D51C7505BA5EF1B /* DeviceSetupStoreTests.swift in Sources */,

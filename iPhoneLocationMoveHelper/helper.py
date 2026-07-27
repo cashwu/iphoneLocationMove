@@ -56,11 +56,26 @@ class ProtocolProcessor:
         except ValueError:
             return self._error(request_id, "invalid-coordinate", "座標超出合法範圍"), False
         except Exception as error:
+            detail = f"{type(error).__name__}: {error}"[:2048]
+            sys.stderr.write(
+                json.dumps(
+                    {
+                        "event": "backend-failure",
+                        "requestID": request_id,
+                        "command": command,
+                        "detail": detail,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            sys.stderr.flush()
             return self._error(
                 request_id,
                 "backend-failure",
                 "DVT location request 失敗",
-                type(error).__name__,
+                detail,
             ), False
 
         return {"requestID": request_id, "ok": True}, command == "shutdown"
@@ -171,14 +186,17 @@ async def async_main(arguments: list[str]) -> int:
         async with PymobiledeviceBackend(options.rsd_host, options.rsd_port) as backend:
             await serve(backend)
     except Exception as error:
+        detail = f"{type(error).__name__}: {error}"[:2048]
         event = {
             "event": "fatal",
             "error": {
                 "code": "session-start-failure",
                 "message": "無法建立 DVT location session",
-                "detail": type(error).__name__,
+                "detail": detail,
             },
         }
+        sys.stderr.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+        sys.stderr.flush()
         sys.stdout.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
         sys.stdout.flush()
         return 1

@@ -81,6 +81,10 @@ class ProtocolProcessorTests(unittest.IsolatedAsyncioTestCase):
         succeeded, _ = await self.processor.handle_line('{"requestID":"clear-2","command":"clear"}')
 
         self.assertEqual(failed["error"]["code"], "backend-failure")
+        self.assertEqual(
+            failed["error"]["detail"],
+            "TimeoutError: DVT request timed out",
+        )
         self.assertEqual(failed["requestID"], "clear-1")
         self.assertEqual(succeeded, {"requestID": "clear-2", "ok": True})
         self.assertEqual(self.backend.clear_calls, 1)
