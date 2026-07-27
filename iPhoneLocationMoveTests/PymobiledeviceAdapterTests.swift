@@ -20,8 +20,90 @@ final class PymobiledeviceAdapterTests: XCTestCase {
                 .trust(device.id),
                 .developerMode(device.id),
                 .developerDiskImage(device.id),
+                .reconcile,
                 .startTunnel(device.id),
                 .startDVT(DeviceSessionGeneration(rawValue: 1)),
+            ]
+        )
+    }
+
+    func testEveryDevicePreparationReconcilesBeforeStartingTunnel() async throws {
+        let device = try makeDevice(id: "device-17")
+        let boundary = FakePymobiledeviceBoundary(devices: [device])
+        let adapter = PymobiledeviceAdapter(boundary: boundary)
+
+        _ = try await adapter.connect()
+        await XCTAssertEqualAsync(
+            {
+                (await boundary.events).filter {
+                    $0 == .reconcile || $0 == .startTunnel(device.id)
+                }
+            },
+            [.reconcile, .startTunnel(device.id)]
+        )
+
+        await adapter.handleUSBDisconnect(deviceID: device.id)
+        await boundary.resetEvents()
+
+        _ = try await adapter.reconnect()
+
+        await XCTAssertEqualAsync(
+            {
+                (await boundary.events).filter {
+                    $0 == .reconcile || $0 == .startTunnel(device.id)
+                }
+            },
+            [.reconcile, .startTunnel(device.id)]
+        )
+    }
+
+    func testReconcileFailureStopsPreparationBeforeTunnelDVTAndReady() async throws {
+        let device = try makeDevice(id: "device-17")
+        let boundary = FakePymobiledeviceBoundary(devices: [device])
+        let logger = RecordingDiagnosticLogger()
+        let adapter = PymobiledeviceAdapter(
+            boundary: boundary,
+            diagnosticLogger: logger
+        )
+        await boundary.setFailure(
+            .tunnelFailure("reconcile failed"),
+            at: .reconcile
+        )
+
+        await XCTAssertThrowsDeviceError(.tunnelFailure("reconcile failed")) {
+            _ = try await adapter.connect()
+        }
+
+        await XCTAssertEqualAsync(
+            { await boundary.events },
+            [
+                .runtime,
+                .usbDiscovery,
+                .trust(device.id),
+                .developerMode(device.id),
+                .developerDiskImage(device.id),
+                .reconcile,
+            ]
+        )
+        await XCTAssertEqualAsync(
+            { await adapter.state },
+            .preparing(device: device, stage: .tunnel)
+        )
+        await XCTAssertEqualAsync(
+            { await adapter.selectedDevice },
+            nil
+        )
+        XCTAssertEqual(
+            logger.events.map(\.event).filter {
+                $0 == "tunnel.reconcile_requested"
+                    || $0 == "tunnel.reconcile_failed"
+                    || $0 == "tunnel.start_requested"
+                    || $0 == "dvt.start_requested"
+                    || $0 == "session.ready"
+            },
+            [
+                "tunnel.reconcile_requested",
+                "tunnel.reconcile_failed",
             ]
         )
     }
@@ -379,6 +461,7 @@ final class PymobiledeviceAdapterTests: XCTestCase {
                 .set(session.generation),
                 .shutdownDVT(session.generation),
                 .stopTunnel(device.id),
+                .reconcile,
                 .startTunnel(device.id),
                 .startDVT(session.generation),
                 .set(session.generation),
@@ -542,6 +625,7 @@ final class PymobiledeviceAdapterTests: XCTestCase {
                 .clear(session.generation),
                 .shutdownDVT(session.generation),
                 .stopTunnel(device.id),
+                .reconcile,
                 .startTunnel(device.id),
                 .startDVT(session.generation),
                 .clear(session.generation),
@@ -550,6 +634,41 @@ final class PymobiledeviceAdapterTests: XCTestCase {
         await XCTAssertEqualAsync(
             { await adapter.state },
             .ready(session)
+        )
+    }
+
+    func testRecoveryReconcileFailureDoesNotStartReplacementTunnelOrDVT() async throws {
+        let device = try makeDevice(id: "device-17")
+        let boundary = FakePymobiledeviceBoundary(devices: [device])
+        let adapter = PymobiledeviceAdapter(boundary: boundary)
+        let session = try await adapter.connect()
+        await boundary.resetEvents()
+        await boundary.enqueueMutationBehaviors([
+            .failure(transportClosedFailure()),
+        ])
+        await boundary.setFailure(
+            .tunnelFailure("reconcile failed"),
+            at: .reconcile
+        )
+
+        await XCTAssertThrowsDeviceError(.tunnelFailure("reconcile failed")) {
+            try await adapter.setLocation(
+                DeviceCoordinate(latitude: 25, longitude: 121),
+                context: DeviceMutationContext(
+                    simulationSessionID: SimulationSessionID(),
+                    generation: session.generation
+                )
+            )
+        }
+
+        await XCTAssertEqualAsync(
+            { await boundary.events },
+            [
+                .set(session.generation),
+                .shutdownDVT(session.generation),
+                .stopTunnel(device.id),
+                .reconcile,
+            ]
         )
     }
 

@@ -111,7 +111,7 @@
 
 ### Requirement: 最小 privileged tunnel 邊界
 
-系統 SHALL 透過受授權的 privileged helper 建立 iOS 17+ tunnel。該 helper MUST 只接受 typed `startTunnel(deviceID, idempotencyKey)`／`stopTunnel(leaseID)`／`status(leaseID)`／`reconcile()` request，MUST NOT 接受任意 shell command、argument list、interpreter path、package path、manifest path 或 output path，且 SHALL 只執行經 App code signature 與 signed-helper embedded digest trust anchor 驗證、原子安裝並在每次啟動前驗證的 root-owned pinned tunnel runtime。
+系統 SHALL 透過受授權的 privileged helper 建立 iOS 17+ tunnel。該 helper MUST 只接受 typed `startTunnel(deviceID, idempotencyKey)`／`stopTunnel(leaseID)`／`status(leaseID)`／`reconcile()` request，MUST NOT 接受任意 shell command、argument list、interpreter path、package path、manifest path 或 output path。helper SHALL 以 signed-helper embedded digest trust anchor驗證offline build inputs，於root-owned private staging建立sealed generated runtime並atomic publish；每次啟動前 MUST驗證seal與完整runtime file set。listener SHALL以公開`NSXPCConnection` security attributes及code signature建立connection-bound caller identity，不宣稱取得raw audit token。
 
 #### Scenario: 使用者核准 tunnel helper
 
@@ -134,10 +134,12 @@
 #### Scenario: 安裝 privileged runtime payload
 
 - **WHEN** 使用者授權安裝 privileged tunnel runtime
-- **THEN** helper SHALL 從 XPC audit token 解析 caller code URL，並驗證 App designated requirement、Team ID 與完整 code signature
-- **AND** helper SHALL 只讀取通過 code-signature 驗證且符合 helper executable 內嵌 digest table 的 offline payload
-- **AND** helper SHALL 拒絕 symlink、digest mismatch、非 root owner 或群組／全域可寫檔案
-- **AND** helper SHALL 經 root-owned temporary directory 驗證後 atomic publish
+- **THEN** listener SHALL在connection `resume()`前讀取`processIdentifier`、`effectiveUserIdentifier`與`auditSessionIdentifier`，並驗證App designated requirement、Team ID與完整code signature
+- **AND** listener SHALL建立不可重用`connectionID`與該connection專屬的exported service，後續request MUST只使用此verified identity
+- **AND** helper SHALL只讀取通過code-signature驗證且符合helper executable內嵌digest table的offline wheelhouse與固定build plan
+- **AND** helper SHALL拒絕input symlink、digest mismatch、非root owner或群組／全域可寫檔案
+- **AND** helper SHALL在root-owned、mode `0700`的private staging離線生成runtime，拒絕symlink與non-regular file，為完整canonical relative path集合建立root-owned、mode `0600`的sealed digest manifest
+- **AND** helper SHALL重新驗證seal、完整file set、owner、mode與digest後atomic publish
 - **AND** root process MUST NOT 執行網路 `pip` 或 user-writable interpreter／package／manifest／staging payload
 
 #### Scenario: payload 與外部 manifest 同時遭替換
@@ -148,9 +150,33 @@
 
 #### Scenario: tunnel runtime 遭竄改
 
-- **WHEN** 每次 start 前的 owner、mode、symlink 或 digest 驗證失敗
+- **WHEN** 每次start前的seal owner／mode、runtime missing／extra file、symlink、file owner／mode或digest驗證失敗
 - **THEN** helper SHALL fail closed 並回傳 runtime-integrity error
 - **AND** helper MUST NOT 啟動 tunnel process
+
+#### Scenario: tunnel process 啟動後沒有回傳 endpoint
+
+- **GIVEN** helper已launch tunnel process並將它附加到current `PendingTunnelStart`
+- **WHEN** stdout在15秒內沒有提供newline-terminated endpoint
+- **THEN** helper SHALL以typed handshake-timeout完成該pending start
+- **AND** helper SHALL停止root tunnel process、移除pending ownership並喚醒所有同key waiter
+- **AND** helper MUST NOT建立active `TunnelLeaseID`
+
+#### Scenario: endpoint 等待期間 caller 消失
+
+- **GIVEN** `PendingTunnelStart`正在等待endpoint
+- **WHEN** owning XPC connection interruption／invalidation或caller process結束
+- **THEN** helper SHALL標記該owner的pending start為cancelled並停止已附加process
+- **AND** invalidation cleanup MUST NOT等待endpoint reader持有的external-I/O lock
+- **AND** 若invalidation早於process attach，leader在attach後 SHALL立即停止process
+
+#### Scenario: pending start 收到相同 idempotency key
+
+- **GIVEN** 同一verified connection、device與idempotency key已有`PendingTunnelStart`
+- **WHEN** caller重送start或第一個reply遺失後retry
+- **THEN** helper SHALL讓request等待同一pending terminal result
+- **AND** helper MUST NOT啟動第二個tunnel process
+- **AND** success時所有waiter SHALL取得同一`TunnelLeaseID`與endpoint
 
 #### Scenario: 重複開始同一 tunnel
 
@@ -161,13 +187,23 @@
 
 #### Scenario: caller 消失或 App crash
 
-- **WHEN** owning XPC connection invalidated、caller process 結束或 App crash
-- **THEN** helper SHALL 回收該 caller 擁有的 tunnel lease 與 root process
+- **WHEN** owning XPC connection invalidated、caller process結束或App crash
+- **THEN** helper SHALL回收該caller擁有的pending start、active tunnel lease與root process
 
 #### Scenario: App 啟動時 reconcile
 
-- **WHEN** App 建立新的 signed XPC session
-- **THEN** 系統 SHALL 呼叫 reconcile 並清理不屬於 current caller session 的遺留 lease
+- **WHEN** App建立新的verified XPC session並完成selected device prerequisites
+- **THEN** 系統 SHALL在`startTunnel`之前呼叫`reconcile()`並清理不屬於current caller session的遺留lease
+- **AND** reconcile failure SHALL回傳typed tunnel setup error
+- **AND** 系統 MUST NOT在reconcile failure後呼叫`startTunnel`、啟動DVT或顯示ready
+
+#### Scenario: production privileged acceptance
+
+- **GIVEN** DEBUG App、實際SMJobBless helper與隔離測試環境
+- **WHEN** 固定case acceptance runner執行positive start、invalid signature／Team ID caller、pending duplicate、lost reply、endpoint timeout、connection invalidation、App termination、startup reconcile、runtime seal tamper及uninstall
+- **THEN** runner SHALL只透過production typed XPC boundary執行並輸出固定schema結果
+- **AND** runner MUST NOT接受任意command、path、interpreter、manifest或argument list
+- **AND** 最終cleanup SHALL確認system service、固定安裝paths與相關root process均不存在
 
 ### Requirement: 序列化且可關聯的裝置命令
 

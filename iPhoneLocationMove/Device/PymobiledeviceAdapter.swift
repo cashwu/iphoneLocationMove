@@ -505,6 +505,35 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
         diagnosticLogger.record(
             .info,
             category: "device",
+            event: "tunnel.reconcile_requested",
+            metadata: ["generation": String(newGeneration.rawValue)]
+        )
+        do {
+            try await boundary.reconcileTunnels()
+            diagnosticLogger.record(
+                .info,
+                category: "device",
+                event: "tunnel.reconcile_succeeded",
+                metadata: ["generation": String(newGeneration.rawValue)]
+            )
+        } catch {
+            diagnosticLogger.record(
+                .error,
+                category: "device",
+                event: "tunnel.reconcile_failed",
+                metadata: [
+                    "generation": String(newGeneration.rawValue),
+                    "failure": String(describing: error),
+                ]
+            )
+            if let failure = error as? DeviceLocationError {
+                throw failure
+            }
+            throw DeviceLocationError.tunnelFailure(error.localizedDescription)
+        }
+        diagnosticLogger.record(
+            .info,
+            category: "device",
             event: "tunnel.start_requested",
             metadata: ["generation": String(newGeneration.rawValue)]
         )
@@ -740,6 +769,9 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
             }
 
             try await boundary.stopTunnel(oldLease)
+            try validateRecoveryOwnership(ownership)
+
+            try await boundary.reconcileTunnels()
             try validateRecoveryOwnership(ownership)
 
             let lease = try await boundary.startTunnel(
@@ -1608,7 +1640,7 @@ private final class LiveTunnelContinuation<Value: Sendable>: @unchecked Sendable
     }
 }
 
-private actor LiveTunnelClient {
+actor LiveTunnelClient {
     private static let serviceName = "com.cash.iPhoneLocationMoveTunnelHelper"
     private var connection: NSXPCConnection?
 
@@ -1691,6 +1723,13 @@ private actor LiveTunnelClient {
             throw Self.map(failure)
         }
     }
+
+#if DEBUG
+    func invalidateConnectionForAcceptance() {
+        connection?.invalidate()
+        connection = nil
+    }
+#endif
 
     private func request<Value: Decodable & Sendable>(
         _ operation: @escaping (

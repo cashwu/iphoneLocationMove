@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "workDirectory": "/tmp/iphone-location-move-acceptance",
+  "cases": [
+    {"id": "positive-start", "runnerCase": "positive-start", "expected": "passed"},
+    {"id": "pending-duplicate", "runnerCase": "pending-duplicate", "expected": "passed"},
+    {"id": "lost-reply-retry", "runnerCase": "lost-reply-retry", "expected": "passed"},
+    {"id": "endpoint-timeout", "runnerCase": "endpoint-timeout", "expectedError": "timeout"},
+    {"id": "connection-invalidation", "runnerCase": "connection-invalidation", "expected": "passed"},
+    {"id": "app-termination", "runnerCase": "app-termination", "expected": "passed"},
+    {"id": "startup-reconcile", "runnerCase": "startup-reconcile", "expected": "passed"},
+    {"id": "runtime-seal-tamper", "runnerCase": "runtime-seal-tamper", "expectedError": "tunnel-failure"},
+    {"id": "invalid-signature", "runnerCase": "positive-start", "callerFixture": "signature-invalid-copy", "expectedError": "tunnel-failure"},
+    {"id": "team-id-mismatch", "runnerCase": "positive-start", "callerFixture": "adhoc-resigned-copy", "expectedError": "tunnel-failure"}
+  ]
+}

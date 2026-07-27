@@ -120,6 +120,7 @@ struct TunnelHelperError: Error, Equatable, Codable, LocalizedError {
         case leaseNotOwned
         case invalidRequest
         case invalidEndpoint
+        case handshakeTimeout
         case processLaunchFailed
         case processExited
         case processStopFailed
@@ -158,6 +159,10 @@ struct TunnelHelperError: Error, Equatable, Codable, LocalizedError {
     static let invalidEndpoint = Self(
         code: .invalidEndpoint,
         detail: "The tunnel process did not return a valid RSD endpoint."
+    )
+    static let handshakeTimeout = Self(
+        code: .handshakeTimeout,
+        detail: "The tunnel process did not return an RSD endpoint within 15 seconds."
     )
     static let processLaunchFailed = Self(
         code: .processLaunchFailed,
@@ -289,6 +294,17 @@ struct EmbeddedPayloadFile: Codable, Equatable, Hashable {
 
 struct TunnelRuntimeManifest: Codable, Equatable {
     let files: [EmbeddedPayloadFile]
+}
+
+struct RuntimeSealFile: Codable, Equatable {
+    let relativePath: String
+    let sha256: String
+    let ownerID: UInt32
+    let mode: UInt16
+}
+
+struct RuntimeSealManifest: Codable, Equatable {
+    let files: [RuntimeSealFile]
 }
 
 struct OfflineRuntimeBuildPlan: Equatable {
@@ -502,6 +518,7 @@ protocol TunnelRuntimeProviding {
 final class PinnedTunnelRuntimeInstaller: TunnelRuntimeProviding {
     static let payloadRelativePath = "Contents/Resources/tunnel-wheelhouse"
     static let manifestName = "runtime-manifest.json"
+    static let sealName = "runtime-seal.json"
 
     private let digestTable: EmbeddedDigestTable
     private let destinationURL: URL
@@ -599,6 +616,7 @@ final class PinnedTunnelRuntimeInstaller: TunnelRuntimeProviding {
             try setMode(0o600, at: stagedManifest)
             if let buildPlan = digestTable.buildPlan {
                 try runtimeBuilder.buildRuntime(in: staging, plan: buildPlan)
+                try writeRuntimeSeal(at: staging)
             }
             _ = try validateRuntime(at: staging)
 
@@ -655,13 +673,19 @@ final class PinnedTunnelRuntimeInstaller: TunnelRuntimeProviding {
             }
         }
 
+        if digestTable.buildPlan != nil {
+            try validateRuntimeSeal(at: root)
+        }
+
         guard let installedPaths = try? fileManager.subpathsOfDirectory(atPath: root.path) else {
             throw TunnelHelperError.runtimeIntegrity
         }
         for relativePath in installedPaths {
+            let isSealedPath = digestTable.buildPlan != nil
+                && relativePath == Self.sealName
             let isGeneratedRuntime = digestTable.buildPlan != nil
                 && (relativePath == "runtime" || relativePath.hasPrefix("runtime/"))
-            guard expectedPaths.contains(relativePath) || isGeneratedRuntime else {
+            guard expectedPaths.contains(relativePath) || isGeneratedRuntime || isSealedPath else {
                 throw integrityError("Unexpected installed runtime path: \(relativePath)")
             }
             let itemURL = try confinedURL(root: root, relativePath: relativePath)
@@ -694,6 +718,83 @@ final class PinnedTunnelRuntimeInstaller: TunnelRuntimeProviding {
             }
         }
         return InstalledTunnelRuntime(rootURL: root, executableURL: executable)
+    }
+
+    private func writeRuntimeSeal(at root: URL) throws {
+        let files = try runtimeSealFiles(at: root)
+        let seal = RuntimeSealManifest(files: files)
+        let data = try JSONEncoder.sorted.encode(seal)
+        let sealURL = root.appendingPathComponent(Self.sealName)
+        try data.write(to: sealURL, options: .withoutOverwriting)
+        try setMode(0o600, at: sealURL)
+    }
+
+    private func validateRuntimeSeal(at root: URL) throws {
+        let sealURL = root.appendingPathComponent(Self.sealName)
+        try verifyMetadata(sealURL, exactMode: 0o600)
+        let sealData = try secureRead(sealURL)
+        guard let seal = try? JSONDecoder().decode(RuntimeSealManifest.self, from: sealData),
+              !seal.files.isEmpty,
+              seal.files.map(\.relativePath) == seal.files.map(\.relativePath).sorted(),
+              Set(seal.files.map(\.relativePath)).count == seal.files.count
+        else {
+            throw integrityError("Generated runtime seal is malformed.")
+        }
+
+        let actualFiles = try runtimeSealFiles(at: root)
+        guard actualFiles == seal.files else {
+            throw integrityError("Generated runtime file set does not match its seal.")
+        }
+
+        var expectedPaths = Set([Self.sealName])
+        for file in seal.files {
+            expectedPaths.insert(file.relativePath)
+            let parentComponents = file.relativePath.split(separator: "/").dropLast()
+            for index in parentComponents.indices {
+                expectedPaths.insert(
+                    parentComponents[parentComponents.startIndex...index].joined(separator: "/")
+                )
+            }
+        }
+        guard let installedPaths = try? fileManager.subpathsOfDirectory(atPath: root.path),
+              Set(installedPaths) == expectedPaths
+        else {
+            throw integrityError("Generated runtime contains missing or extra paths.")
+        }
+    }
+
+    private func runtimeSealFiles(at root: URL) throws -> [RuntimeSealFile] {
+        guard let relativePaths = try? fileManager.subpathsOfDirectory(atPath: root.path) else {
+            throw TunnelHelperError.runtimeIntegrity
+        }
+        var files: [RuntimeSealFile] = []
+        for relativePath in relativePaths.sorted() where relativePath != Self.sealName {
+            let url = try confinedURL(root: root, relativePath: relativePath)
+            var info = stat()
+            guard lstat(url.path, &info) == 0,
+                  info.st_mode & S_IFMT != S_IFLNK,
+                  info.st_uid == requiredOwnerID,
+                  info.st_mode & 0o022 == 0
+            else {
+                throw integrityError("Generated runtime metadata mismatch: \(relativePath)")
+            }
+            if info.st_mode & S_IFMT == S_IFDIR {
+                continue
+            }
+            guard info.st_mode & S_IFMT == S_IFREG else {
+                throw integrityError("Generated runtime contains a non-regular file: \(relativePath)")
+            }
+            let data = try secureRead(url)
+            files.append(
+                RuntimeSealFile(
+                    relativePath: relativePath,
+                    sha256: Self.digest(data),
+                    ownerID: info.st_uid,
+                    mode: UInt16(info.st_mode & 0o777)
+                )
+            )
+        }
+        return files
     }
 
     private func secureRead(_ url: URL) throws -> Data {
@@ -830,7 +931,7 @@ protocol TunnelProcessControlling: AnyObject {
     var isRunning: Bool { get }
     var terminationStatus: Int32? { get }
     var diagnostics: TunnelProcessDiagnostics { get }
-    func readEndpointLine() throws -> String
+    func readEndpointLine(deadline: DispatchTime) throws -> String
     func stop() throws
 }
 
@@ -937,9 +1038,33 @@ final class FoundationTunnelProcess: TunnelProcessControlling {
         )
     }
 
-    func readEndpointLine() throws -> String {
+    func readEndpointLine(deadline: DispatchTime) throws -> String {
         var data = Data()
         while true {
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now < deadline.uptimeNanoseconds else {
+                throw TunnelHelperError.handshakeTimeout
+            }
+            let remainingNanoseconds = deadline.uptimeNanoseconds - now
+            let remainingMilliseconds = max(
+                1,
+                min(Int32.max, Int32(remainingNanoseconds / 1_000_000))
+            )
+            var descriptor = pollfd(
+                fd: output.fileDescriptor,
+                events: Int16(POLLIN | POLLHUP),
+                revents: 0
+            )
+            let pollResult = Darwin.poll(&descriptor, 1, remainingMilliseconds)
+            if pollResult == 0 {
+                throw TunnelHelperError.handshakeTimeout
+            }
+            if pollResult < 0 {
+                if errno == EINTR {
+                    continue
+                }
+                throw TunnelHelperError.processExited
+            }
             guard let byte = try output.read(upToCount: 1), !byte.isEmpty else {
                 throw TunnelHelperError.processExited
             }
@@ -980,6 +1105,7 @@ final class FoundationTunnelProcess: TunnelProcessControlling {
 final class FoundationTunnelProcessLauncher: TunnelProcessLaunching {
     static let processEnvironment = [
         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONNOUSERSITE": "1",
     ]
 
@@ -1014,23 +1140,39 @@ final class FoundationTunnelProcessLauncher: TunnelProcessLaunching {
     }
 }
 
-private struct LeaseKey: Hashable {
-    let caller: CallerAuditIdentity
+struct TunnelStartKey: Hashable {
+    let connectionID: UUID
     let deviceID: DeviceID
     let idempotencyKey: UUID
 }
 
+private final class PendingTunnelStart {
+    let key: TunnelStartKey
+    let owner: CallerAuditIdentity
+    var process: TunnelProcessControlling?
+    var cancelled = false
+    var terminalResult: Result<TunnelLeaseSnapshot, TunnelHelperError>?
+
+    init(key: TunnelStartKey, owner: CallerAuditIdentity) {
+        self.key = key
+        self.owner = owner
+    }
+}
+
 private final class TunnelLease {
-    let key: LeaseKey
+    let key: TunnelStartKey
+    let owner: CallerAuditIdentity
     let snapshot: TunnelLeaseSnapshot
     let process: TunnelProcessControlling
 
     init(
-        key: LeaseKey,
+        key: TunnelStartKey,
+        owner: CallerAuditIdentity,
         snapshot: TunnelLeaseSnapshot,
         process: TunnelProcessControlling
     ) {
         self.key = key
+        self.owner = owner
         self.snapshot = snapshot
         self.process = process
     }
@@ -1041,20 +1183,26 @@ final class TunnelLeaseManager: @unchecked Sendable {
     private let callerVerifier: CallerCodeVerifying
     private let runtimeProvider: TunnelRuntimeProviding
     private let processLauncher: TunnelProcessLaunching
-    private let lock = NSLock()
+    private let endpointTimeout: TimeInterval
+    private let condition = NSCondition()
+    private var verifiedConnections: [UUID: VerifiedCaller] = [:]
+    private var invalidatedConnectionIDs: Set<UUID> = []
+    private var pendingStarts: [TunnelStartKey: PendingTunnelStart] = [:]
     private var leasesByID: [TunnelLeaseID: TunnelLease] = [:]
-    private var leaseIDsByKey: [LeaseKey: TunnelLeaseID] = [:]
+    private var leaseIDsByKey: [TunnelStartKey: TunnelLeaseID] = [:]
 
     init(
         trustPolicy: CallerTrustPolicy,
         callerVerifier: CallerCodeVerifying,
         runtimeProvider: TunnelRuntimeProviding,
-        processLauncher: TunnelProcessLaunching
+        processLauncher: TunnelProcessLaunching,
+        endpointTimeout: TimeInterval = 15
     ) {
         self.trustPolicy = trustPolicy
         self.callerVerifier = callerVerifier
         self.runtimeProvider = runtimeProvider
         self.processLauncher = processLauncher
+        self.endpointTimeout = endpointTimeout
     }
 
     func startTunnel(
@@ -1062,134 +1210,255 @@ final class TunnelLeaseManager: @unchecked Sendable {
         deviceID rawDeviceID: String,
         idempotencyKey: UUID
     ) throws -> TunnelLeaseSnapshot {
-        try lock.withLock {
-            let caller = try verifyCaller(identity)
-            let deviceID = try DeviceID(validating: rawDeviceID)
-            let key = LeaseKey(
-                caller: caller.identity,
-                deviceID: deviceID,
-                idempotencyKey: idempotencyKey
-            )
-            if let leaseID = leaseIDsByKey[key], let lease = leasesByID[leaseID] {
-                guard lease.process.isRunning else {
-                    removeLease(leaseID)
-                    throw TunnelHelperError.processExited
-                }
-                return lease.snapshot
-            }
+        let caller = try verifyCaller(identity)
+        let deviceID = try DeviceID(validating: rawDeviceID)
+        let key = TunnelStartKey(
+            connectionID: caller.identity.connectionID,
+            deviceID: deviceID,
+            idempotencyKey: idempotencyKey
+        )
 
-            let runtime = try runtimeProvider.prepareRuntime(for: caller)
-            let process = try processLauncher.launch(runtime: runtime, deviceID: deviceID)
-            let endpoint: TunnelEndpoint
-            do {
-                endpoint = try parseEndpoint(process.readEndpointLine())
-            } catch {
-                try? process.stop()
-                throw error
+        condition.lock()
+        if let leaseID = leaseIDsByKey[key], let lease = leasesByID[leaseID] {
+            condition.unlock()
+            guard lease.process.isRunning else {
+                condition.lock()
+                if leasesByID[leaseID] === lease {
+                    removeLease(leaseID)
+                }
+                condition.unlock()
+                throw TunnelHelperError.processExited
             }
+            return lease.snapshot
+        }
+        if let pending = pendingStarts[key] {
+            while pending.terminalResult == nil {
+                condition.wait()
+            }
+            let result = pending.terminalResult!
+            condition.unlock()
+            return try result.get()
+        }
+        let pending = PendingTunnelStart(key: key, owner: caller.identity)
+        pendingStarts[key] = pending
+        condition.unlock()
+
+        let process: TunnelProcessControlling
+        do {
+            let runtime = try runtimeProvider.prepareRuntime(for: caller)
+            process = try processLauncher.launch(runtime: runtime, deviceID: deviceID)
+        } catch let error as TunnelHelperError {
+            return try finishPendingFailure(pending, error: error)
+        } catch {
+            return try finishPendingFailure(pending, error: .processLaunchFailed)
+        }
+
+        condition.lock()
+        let wasCancelled = pending.cancelled || pendingStarts[key] !== pending
+        if !wasCancelled {
+            pending.process = process
+        }
+        let cancelledResult = pending.terminalResult
+        condition.unlock()
+        if wasCancelled {
+            try? process.stop()
+            if let cancelledResult {
+                return try cancelledResult.get()
+            }
+            return try finishPendingFailure(pending, error: ownerInvalidatedError)
+        }
+
+        do {
+            let deadline = DispatchTime.now() + endpointTimeout
+            let endpoint = try parseEndpoint(process.readEndpointLine(deadline: deadline))
             guard process.isRunning else {
                 throw TunnelHelperError(
                     code: .processExited,
                     detail: "The tunnel process exited with status \(process.terminationStatus ?? -1)."
                 )
             }
-
-            let leaseID = TunnelLeaseID()
             let snapshot = TunnelLeaseSnapshot(
-                leaseID: leaseID,
+                leaseID: TunnelLeaseID(),
                 deviceID: deviceID,
                 endpoint: endpoint,
                 state: .running,
                 diagnostics: process.diagnostics
             )
-            leasesByID[leaseID] = TunnelLease(
+            condition.lock()
+            guard !pending.cancelled, pendingStarts[key] === pending else {
+                let result = pending.terminalResult
+                condition.unlock()
+                try? process.stop()
+                if let result {
+                    return try result.get()
+                }
+                return try finishPendingFailure(pending, error: ownerInvalidatedError)
+            }
+            let lease = TunnelLease(
                 key: key,
+                owner: caller.identity,
                 snapshot: snapshot,
                 process: process
             )
-            leaseIDsByKey[key] = leaseID
+            leasesByID[snapshot.leaseID] = lease
+            leaseIDsByKey[key] = snapshot.leaseID
+            pending.process = nil
+            pending.terminalResult = .success(snapshot)
+            pendingStarts.removeValue(forKey: key)
+            condition.broadcast()
+            condition.unlock()
             return snapshot
+        } catch let error as TunnelHelperError {
+            return try finishPendingFailure(pending, error: error)
+        } catch {
+            return try finishPendingFailure(pending, error: .processExited)
         }
+    }
+
+    @discardableResult
+    func establishConnection(_ identity: CallerAuditIdentity) throws -> VerifiedCaller {
+        try verifyCaller(identity)
     }
 
     func stopTunnel(
         caller identity: CallerAuditIdentity,
         leaseID: TunnelLeaseID
     ) throws {
-        try lock.withLock {
-            let caller = try verifyCaller(identity)
-            let lease = try ownedLease(leaseID, caller: caller.identity)
-            do {
-                try lease.process.stop()
-            } catch {
-                throw TunnelHelperError.processStopFailed
-            }
-            removeLease(leaseID)
+        let caller = try verifyCaller(identity)
+        condition.lock()
+        let lease: TunnelLease
+        do {
+            lease = try ownedLease(leaseID, caller: caller.identity)
+        } catch {
+            condition.unlock()
+            throw error
         }
+        condition.unlock()
+        do {
+            try lease.process.stop()
+        } catch {
+            throw TunnelHelperError.processStopFailed
+        }
+        condition.lock()
+        removeLease(leaseID)
+        condition.unlock()
     }
 
     func status(
         caller identity: CallerAuditIdentity,
         leaseID: TunnelLeaseID
     ) throws -> TunnelLeaseSnapshot {
-        try lock.withLock {
-            let caller = try verifyCaller(identity)
-            let lease = try ownedLease(leaseID, caller: caller.identity)
-            let snapshot = makeSnapshot(for: lease)
-            if snapshot.state == .exited {
-                removeLease(leaseID)
-            }
-            return snapshot
+        let caller = try verifyCaller(identity)
+        condition.lock()
+        let lease: TunnelLease
+        do {
+            lease = try ownedLease(leaseID, caller: caller.identity)
+        } catch {
+            condition.unlock()
+            throw error
         }
+        condition.unlock()
+        let snapshot = makeSnapshot(for: lease)
+        if snapshot.state == .exited {
+            condition.lock()
+            removeLease(leaseID)
+            condition.unlock()
+        }
+        return snapshot
     }
 
     func reconcile(caller identity: CallerAuditIdentity) throws -> ReconcileReport {
-        try lock.withLock {
-            let caller = try verifyCaller(identity)
-            let staleLeaseIDs = leasesByID.compactMap { leaseID, lease in
-                lease.key.caller == caller.identity ? nil : leaseID
-            }
-            var reclaimed = 0
-            var failures: [TunnelHelperError] = []
-            for leaseID in staleLeaseIDs {
-                guard let lease = leasesByID[leaseID] else {
-                    continue
-                }
-                do {
-                    try lease.process.stop()
-                    removeLease(leaseID)
-                    reclaimed += 1
-                } catch {
-                    failures.append(.processStopFailed)
-                }
-            }
-            return ReconcileReport(reclaimedLeaseCount: reclaimed, failures: failures)
+        let caller = try verifyCaller(identity)
+        condition.lock()
+        let staleLeases = leasesByID.compactMap { leaseID, lease in
+            lease.owner == caller.identity ? nil : (leaseID, lease)
         }
+        condition.unlock()
+        var reclaimed = 0
+        var failures: [TunnelHelperError] = []
+        for (leaseID, lease) in staleLeases {
+            do {
+                try lease.process.stop()
+                condition.lock()
+                removeLease(leaseID)
+                condition.unlock()
+                reclaimed += 1
+            } catch {
+                failures.append(.processStopFailed)
+            }
+        }
+        return ReconcileReport(reclaimedLeaseCount: reclaimed, failures: failures)
     }
 
     @discardableResult
     func invalidateOwner(_ identity: CallerAuditIdentity) -> [TunnelHelperError] {
-        lock.withLock {
-            let ownedLeaseIDs = leasesByID.compactMap { leaseID, lease in
-                lease.key.caller == identity ? leaseID : nil
-            }
-            var failures: [TunnelHelperError] = []
-            for leaseID in ownedLeaseIDs {
-                guard let lease = leasesByID[leaseID] else {
-                    continue
-                }
-                do {
-                    try lease.process.stop()
-                    removeLease(leaseID)
-                } catch {
-                    failures.append(.processStopFailed)
-                }
-            }
-            return failures
+        condition.lock()
+        verifiedConnections.removeValue(forKey: identity.connectionID)
+        invalidatedConnectionIDs.insert(identity.connectionID)
+        let ownedPending = pendingStarts.values.filter { $0.owner == identity }
+        let pendingProcesses = ownedPending.compactMap { pending -> TunnelProcessControlling? in
+            pending.cancelled = true
+            defer { pending.process = nil }
+            return pending.process
         }
+        let ownedLeases = leasesByID.compactMap { leaseID, lease in
+            lease.owner == identity ? (leaseID, lease) : nil
+        }
+        condition.unlock()
+
+        var failures: [TunnelHelperError] = []
+        for process in pendingProcesses {
+            do {
+                try process.stop()
+            } catch {
+                failures.append(.processStopFailed)
+            }
+        }
+        for (leaseID, lease) in ownedLeases {
+            do {
+                try lease.process.stop()
+                condition.lock()
+                removeLease(leaseID)
+                condition.unlock()
+            } catch {
+                failures.append(.processStopFailed)
+            }
+        }
+
+        condition.lock()
+        for pending in ownedPending where pending.terminalResult == nil {
+            pending.terminalResult = .failure(ownerInvalidatedError)
+            if pendingStarts[pending.key] === pending {
+                pendingStarts.removeValue(forKey: pending.key)
+            }
+        }
+        condition.broadcast()
+        condition.unlock()
+        return failures
     }
 
     private func verifyCaller(_ identity: CallerAuditIdentity) throws -> VerifiedCaller {
+        guard identity.processIdentifier > 1,
+              identity.effectiveUserIdentifier > 0,
+              identity.auditSessionIdentifier >= 0
+        else {
+            throw TunnelHelperError.callerNotTrusted
+        }
+
+        condition.lock()
+        if invalidatedConnectionIDs.contains(identity.connectionID) {
+            condition.unlock()
+            throw TunnelHelperError.callerNotTrusted
+        }
+        if let caller = verifiedConnections[identity.connectionID] {
+            condition.unlock()
+            guard caller.identity == identity else {
+                throw TunnelHelperError.callerNotTrusted
+            }
+            return caller
+        }
+        condition.unlock()
+
         let caller: VerifiedCaller
         do {
             caller = try callerVerifier.verify(identity: identity, policy: trustPolicy)
@@ -1202,6 +1471,19 @@ final class TunnelLeaseManager: @unchecked Sendable {
         else {
             throw TunnelHelperError.callerNotTrusted
         }
+
+        condition.lock()
+        defer { condition.unlock() }
+        guard !invalidatedConnectionIDs.contains(identity.connectionID) else {
+            throw TunnelHelperError.callerNotTrusted
+        }
+        if let existing = verifiedConnections[identity.connectionID] {
+            guard existing == caller else {
+                throw TunnelHelperError.callerNotTrusted
+            }
+            return existing
+        }
+        verifiedConnections[identity.connectionID] = caller
         return caller
     }
 
@@ -1222,7 +1504,7 @@ final class TunnelLeaseManager: @unchecked Sendable {
         guard let lease = leasesByID[leaseID] else {
             throw TunnelHelperError.unknownLease
         }
-        guard lease.key.caller == caller else {
+        guard lease.owner == caller else {
             throw TunnelHelperError.leaseNotOwned
         }
         return lease
@@ -1233,6 +1515,40 @@ final class TunnelLeaseManager: @unchecked Sendable {
             return
         }
         leaseIDsByKey.removeValue(forKey: lease.key)
+    }
+
+    private var ownerInvalidatedError: TunnelHelperError {
+        TunnelHelperError(
+            code: .processExited,
+            detail: "The owning caller connection was invalidated."
+        )
+    }
+
+    private func finishPendingFailure(
+        _ pending: PendingTunnelStart,
+        error: TunnelHelperError
+    ) throws -> TunnelLeaseSnapshot {
+        condition.lock()
+        if let terminal = pending.terminalResult {
+            condition.unlock()
+            return try terminal.get()
+        }
+        let process = pending.process
+        pending.process = nil
+        condition.unlock()
+        try? process?.stop()
+
+        condition.lock()
+        if pending.terminalResult == nil {
+            pending.terminalResult = .failure(error)
+        }
+        if pendingStarts[pending.key] === pending {
+            pendingStarts.removeValue(forKey: pending.key)
+        }
+        let terminal = pending.terminalResult!
+        condition.broadcast()
+        condition.unlock()
+        return try terminal.get()
     }
 
     private func makeSnapshot(for lease: TunnelLease) -> TunnelLeaseSnapshot {
@@ -1352,19 +1668,11 @@ final class TunnelHelperXPCService: NSObject, TunnelHelperXPCProtocol {
 }
 
 final class TunnelHelperListenerDelegate: NSObject, NSXPCListenerDelegate {
-    private let trustPolicy: CallerTrustPolicy
-    private let callerVerifier: CallerCodeVerifying
     private let manager: TunnelLeaseManager
     private let lock = NSLock()
     private var services: [ObjectIdentifier: TunnelHelperXPCService] = [:]
 
-    init(
-        trustPolicy: CallerTrustPolicy,
-        callerVerifier: CallerCodeVerifying,
-        manager: TunnelLeaseManager
-    ) {
-        self.trustPolicy = trustPolicy
-        self.callerVerifier = callerVerifier
+    init(manager: TunnelLeaseManager) {
         self.manager = manager
     }
 
@@ -1378,7 +1686,7 @@ final class TunnelHelperListenerDelegate: NSObject, NSXPCListenerDelegate {
             auditSessionIdentifier: Int32(connection.auditSessionIdentifier),
             connectionID: UUID()
         )
-        guard (try? callerVerifier.verify(identity: caller, policy: trustPolicy)) != nil else {
+        guard (try? manager.establishConnection(caller)) != nil else {
             return false
         }
 
@@ -1471,8 +1779,6 @@ private let productionManager = TunnelLeaseManager(
     processLauncher: FoundationTunnelProcessLauncher()
 )
 private let productionDelegate = TunnelHelperListenerDelegate(
-    trustPolicy: productionCallerPolicy,
-    callerVerifier: productionCallerVerifier,
     manager: productionManager
 )
 private let productionListener = NSXPCListener(

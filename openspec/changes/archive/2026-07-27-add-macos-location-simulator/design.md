@@ -13,10 +13,13 @@ macOS UI、路線狀態與 Python／root process 的生命週期是新的跨層 
 - 以一個可稽核的裝置 adapter 管理 runtime、USB device、tunnel、DVT session、序列化命令、重試及清除。
 - 明確表示 prerequisite、授權、連線、中斷與清除失敗，不把「已送出命令」誤報為成功。
 - 讓核心路線與狀態轉移可用 deterministic clock 及 fake device client 測試。
+- 讓 tunnel process 從 launch 起就受到可取消 ownership管理，endpoint無回應或caller消失時不得遺留root process。
+- 以公開`NSXPCConnection` security attributes建立connection-bound caller trust，並以production XPC acceptance驗證真實privileged boundary。
 
 **Non-Goals**
 
 - Wi-Fi、並行控制多裝置、隨機位置、背景常駐 menu bar product、內建 Python runtime 或公開發佈包裝。
+- 防禦已取得root權限且可同時替換helper executable與root-owned runtime seal的攻擊者。
 - 與其他 repository 共用程式碼或資料。
 - 遊戲自動操作、反偵測或規避第三方服務處分。
 
@@ -95,13 +98,27 @@ MapKit pedestrian route 的 polyline 會預先轉成帶 cumulative distance 的 
 
 ### 6. Privileged tunnel 最小化
 
-`iPhoneLocationMoveTunnelHelper/` 是透過 `SMAppService` 註冊的 privileged helper，只提供 `startTunnel(deviceID, idempotencyKey)`, `stopTunnel(leaseID)`、`status(leaseID)` 與 `reconcile()`。它不得接受 shell 字串、任意 flags、Python path、package path 或任意 output path。
+`iPhoneLocationMoveTunnelHelper/` 是透過 `SMJobBless` 安裝並向 launchd 註冊的 privileged helper，只提供 `startTunnel(deviceID, idempotencyKey)`, `stopTunnel(leaseID)`、`status(leaseID)` 與 `reconcile()`。Apple Development 簽署的本機開發版本使用此機制完成管理員核准；這不改變 typed XPC、caller trust、runtime integrity 或 cleanup contract。它不得接受 shell 字串、任意 flags、Python path、package path 或任意 output path。
 
-privileged runtime payload 由 signed App bundle 內的 offline wheelhouse 提供；預期 digest table 編譯在 signed privileged helper executable 內，MUST NOT 從 caller path 或外部 manifest 載入。helper 從 XPC audit token 解析 caller code URL，先以 Security framework 驗證 App designated requirement、Team ID 與完整 code signature，且 caller requirement 必須與 helper 編譯時固定值相符，才可讀取該 bundle payload。payload 與外部 manifest 同時替換、重新 ad-hoc signing、Team ID mismatch 或 invalid signature 均 fail closed。
+privileged runtime payload 由 signed App bundle 內的 offline wheelhouse 提供。helper executable內嵌trust anchor固定external manifest、所有wheel digest、mode與固定offline build plan，MUST NOT從caller提供的manifest或path建立trust。helper只在root-owned、mode `0700`且不可由一般使用者修改的private staging中，以root-owned Python `>=3.9`執行固定的`pip install --isolated --no-index --no-compile --target`。build完成後helper遍歷canonical relative paths，拒絕symlink與non-regular file，為每個generated file記錄SHA-256、owner與mode，將排序後的完整集合寫成root-owned、mode `0600`的sealed runtime manifest，再驗證一次後atomic rename publish。每次start都必須驗證seal本身的owner／mode、完整file set無missing或extra、每個file無symlink且owner／mode／digest一致。此seal不防禦已取得root並可同時替換helper與seal的攻擊者，但一般使用者不能修改seal或runtime。root process MUST NOT執行network `pip`或user-writable interpreter／package／manifest／staging payload。
 
-runtime 使用 root-owned、不可由一般使用者修改且 Python `>=3.9` 的 interpreter 建立。安裝流程 MUST 以 `O_NOFOLLOW`／等價機制拒絕 symlink，依 helper 內嵌 digest table 逐檔驗證，複製到 root-owned temporary directory，重新驗證 owner／mode／digest 後以 atomic rename publish。root process MUST NOT 執行網路 `pip`、user-writable interpreter、package、manifest 或 staging payload。每次 tunnel 啟動前重新驗證 runtime root ownership、不可群組／全域寫入、無 symlink 與 payload digest；任何 mismatch 都 fail closed。
+`NSXPCConnection`公開API不提供raw audit token。listener在`resume()`前讀取kernel提供的`processIdentifier`、`effectiveUserIdentifier`與`auditSessionIdentifier`，用PID取得dynamic `SecCode`並驗證固定designated requirement、Team ID與完整static code signature；驗證成功後建立只屬於該connection的`TunnelHelperXPCService`與不可重用`connectionID`。所有request只經該verified exported service抵達manager，並帶同一connection-bound identity；connection interruption／invalidation立即使identity失效並觸發owner cleanup。artifacts不再宣稱helper取得raw audit token。
 
-helper 以 caller audit identity、device ID 與 idempotency key 建立唯一 `TunnelLeaseID`。同一 caller／device 的重複 start 回傳既有 lease；start reply 遺失可用相同 key reconcile。XPC invalidation、owner death、App crash 或 explicit stop 都回收 lease 與 root tunnel process。App 啟動時呼叫 `reconcile()` 清理不屬於 current signed caller session 的遺留 lease。RSD endpoint 透過受型別約束的 XPC reply 回傳。拒絕授權、endpoint parse 失敗、process 提前退出或 stop 失敗都要回傳結構化錯誤。
+#### Pending tunnel start ownership
+
+helper以`TunnelStartKey(connectionID, deviceID, idempotencyKey)`識別active lease形成前的同一logical start。`TunnelLeaseManager`使用一個`NSCondition`保護`pendingStarts`與active leases；外部runtime build、process launch、endpoint read與process stop一律在condition lock外執行。
+
+第一個start建立`PendingTunnelStart`後成為leader。process launch成功後，leader必須先把process附加到pending ownership，再讀endpoint；若invalidation已先把pending標成cancelled，leader立即停止process。endpoint read使用`poll(2)`或等價可中斷file-descriptor等待，deadline固定為15秒且line上限16 KiB。timeout、EOF、invalid endpoint、process exit或cancel都停止process、移除pending並broadcast terminal failure。
+
+相同`TunnelStartKey`的concurrent或lost-reply retry不得launch第二個process；它在`NSCondition.wait(until:)`等待同一pending terminal result。成功時leader原子地把pending轉成唯一`TunnelLeaseID`並broadcast同一snapshot；失敗時所有waiter收到同一typed error。owner invalidation在condition內標記該owner全部pending為cancelled並取出已附加process，隨即release lock、停止process，再broadcast；因此不得等待leader持有的external I/O。
+
+active lease仍以verified connection identity、device ID與idempotency key管理。同一caller／device的重複start回傳既有lease；start reply遺失可用相同key取得pending或active結果。XPC invalidation、owner death、App crash或explicit stop都回收pending start、active lease與root process。RSD endpoint透過受型別約束的XPC reply回傳；拒絕授權、handshake timeout、endpoint parse失敗、process提前退出或stop失敗都回傳結構化錯誤。
+
+App每次`prepareSession`在selected device prerequisites完成、呼叫`startTunnel`之前，必須對新verified XPC connection執行一次`reconcile()`。reconcile failure映射成typed tunnel setup failure，阻止start／DVT／ready；成功後才可建立新的pending start。quit teardown仍執行reconcile作為最後cleanup。
+
+#### Production privileged acceptance
+
+DEBUG App可接受固定enum形式的`--privileged-helper-acceptance-case`，只驅動既有typed XPC methods與固定fixtures，MUST NOT接受任意command、argument list、interpreter、package、manifest或output path。acceptance runner以production signed App、實際SMJobBless helper與root process驗證positive start、pending duplicate、lost reply retry、endpoint timeout、connection invalidation／App termination cleanup、startup reconcile及runtime seal tamper；非法／被竄改caller則以修改後signature-invalid copy與ad-hoc re-signed Team-ID-mismatch copy驗證listener拒絕。每個case輸出固定schema到stdout，最終uninstall後確認service、fixed paths與相關root process均不存在。
 
 這個 root-owned tunnel runtime 不等同公開發佈版的內建 Python runtime；它只服務必要的 privileged tunnel，公開發佈前仍須完成簽署、公證、第三方授權與更新策略評估。
 
@@ -110,6 +127,8 @@ helper 以 caller audit identity、device ID 與 idempotency key 建立唯一 `T
 `PymobiledeviceAdapter` actor 序列化所有 mutating operation，並以遞增的 `DeviceSessionGeneration` 標記 connect/reconnect。來自舊 generation 的 helper 或 tunnel callback 一律忽略。
 
 準備順序固定為 runtime probe → USB discovery／device selection → trust 與 Developer Mode 檢查 → DDI mount → tunnel → DVT helper ready。任何階段失敗都停在具體狀態並提供對應修復資訊，不得跳過 prerequisite。
+
+tunnel階段的內部順序固定為建立verified XPC connection → `reconcile()` → `startTunnel`。`reconcile()` failure不得被忽略或降級成warning，也不得繼續建立新lease。
 
 USB 中斷會取消 route tick、關閉可控的 local session 並進入 `interrupted(positionUnknown)`。同一裝置重新連線後先建立新 generation 與 tunnel，再執行 `clearLocation()`；只有收到 clear success 才進入 ready，且不自動恢復舊路線。
 
@@ -144,7 +163,10 @@ directions outcome 分成 `routeAvailable`、`noPedestrianRoute`、`cancelled`�
 
 4. **Privilege boundary**
    - `iPhoneLocationMoveTunnelHelper/` SHALL 只接受 typed `startTunnel(deviceID, idempotencyKey)`、`stopTunnel(leaseID)`、`status(leaseID)` 與 `reconcile()` requests，且 MUST NOT 接受任意 command、argument list、interpreter path、package path、manifest path 或 output path。
-   - privileged helper SHALL 以固定 designated requirement／Team ID、caller code signature 與 helper executable 內嵌 digest table 驗證 signed App bundle payload，並只執行原子安裝且每次啟動前重新驗證的 root-owned pinned tunnel runtime；所有 XPC request SHALL 驗證 caller audit identity、device ID、idempotency key 及 `TunnelLeaseID` ownership。
+   - privileged helper SHALL以固定designated requirement／Team ID、caller code signature與helper executable內嵌input digest table驗證signed App bundle payload；generated runtime SHALL由root-owned private staging建立sealed digest manifest、atomic publish，並在每次start前驗證完整file set、owner、mode、symlink與digest。
+   - 每個XPC request SHALL只經listener已驗證的connection-specific exported service抵達manager；identity SHALL綁定`processIdentifier`、`effectiveUserIdentifier`、`auditSessionIdentifier`與不可重用`connectionID`，不得宣稱使用公開API未提供的raw audit token。
+   - `PendingTunnelStart` SHALL以`TunnelStartKey`與`NSCondition`管理launch至active lease之間的ownership；15秒endpoint deadline、owner invalidation、timeout與parse failure都 SHALL回收root process，同key重試 MUST NOT launch第二個process。
+   - production adapter SHALL在每次start tunnel前成功執行`reconcile()`；failure MUST阻止DVT與ready。
    - root process MUST NOT 執行網路 `pip` 或任何 user-writable interpreter、package、manifest、symlink 或 staging payload。
 
 5. **Map behavior**
@@ -159,13 +181,16 @@ directions outcome 分成 `routeAvailable`、`noPedestrianRoute`、`cancelled`�
    - `iPhoneLocationMoveTests/` SHALL 以 controllable monotonic clock 與 fake device coordinate 驗證 `900 m @ 4.5 km/h = 12 minutes`、約一秒 scheduling、single-in-flight coalescing、in-flight pause correction／uncertain failure、pause/resume、in-flight speed rebase 的 confirmed-distance baseline／uncertain failure、端點 overflow、往返、running-only sleep pause 與 stale callback suppression。
    - helper protocol tests SHALL 驗證 malformed JSON、未知 command、無效座標、request ID correlation 與 clear failure。
    - adapter tests SHALL 使用 fake process／XPC boundary 驗證 prerequisite 順序、單一 mutating command、generation replacement、device switch transaction、transport failure、disconnect cleanup 與 reconnect-before-clear。
-   - privileged-helper acceptance SHALL 驗證實際 owner／mode／digest、payload 與 manifest 同時替換、invalid App signature／designated requirement／Team ID、symlink／tamper fail closed、非法 caller、idempotent start、XPC invalidation／App crash 回收與 uninstall cleanup。
+   - privileged-helper deterministic tests SHALL驗證`PendingTunnelStart`的leader／waiter、invalidation-before-process-attach、hanging endpoint deadline、同key單一launch、startup reconcile ordering／failure、connection-bound identity、runtime seal的missing／extra／digest tamper與所有terminal cleanup。
+   - privileged-helper production acceptance SHALL使用DEBUG fixed-case runner與實際SMJobBless helper驗證真實owner／mode／digest、invalid signature／Team ID caller rejection、pending／active idempotency、lost reply、endpoint timeout、XPC invalidation／App termination、startup reconcile、runtime seal tamper與uninstall cleanup；fake harness不得作為這些production cases的唯一證據。
    - physical-device acceptance SHALL 在一台 iOS 17+ USB iPhone 上驗證單點、單程、往返、pause、quit clear 與拔線／重連；自動化測試不得要求實體 iPhone。
 
 ## Risks / Trade-offs
 
 - **Apple 或 `pymobiledevice3` protocol 改變**：capability probe 與 typed adapter 限制影響面；版本更新必須重新跑 physical-device acceptance。
 - **Privileged helper 擴大攻擊面**：以固定 typed XPC contract、audit identity、lease ownership、offline hash-locked payload、symlink／mode／digest 驗證、atomic install、owner-death cleanup 與最小權限降低風險。公開發佈前必須另做 security、dependency licensing 與 signing review。
+- **DEBUG acceptance runner 被誤用**：只接受編譯期固定case enum與typed XPC methods，不接受任意path／command／argument；Release build完全不編譯此入口。
+- **Root attacker 可替換runtime seal**：本change的threat model只保證一般使用者與被竄改caller不能改寫privileged runtime；已取得root並能替換helper executable者不在此boundary內。
 - **App-managed venv 安裝依賴網路與既有 Python**：提供可重試進度與明確離線／缺 Python 指引；不在第一版偷偷安裝 system dependency。
 - **MapKit route 可能不存在或動態改變**：沒有 pedestrian route 時禁止開始並保留 A、B 供修改；active session 使用已確認的 immutable polyline，不在途中靜默換線。
 - **USB 斷線時無法保證立即 clear 裝置端狀態**：UI 明確顯示 interrupted，重連後強制 clear 且不自動 resume。

@@ -3,6 +3,69 @@ import XCTest
 
 @MainActor
 final class AppLifecycleTests: XCTestCase {
+    func testPrivilegedAcceptanceArgumentsOnlyAllowFixedCases() {
+        for acceptanceCase in PrivilegedHelperAcceptanceCase.allCases {
+            XCTAssertEqual(
+                PrivilegedHelperAcceptanceCase.parse(
+                    [
+                        "iPhoneLocationMove",
+                        "--privileged-helper-acceptance-case",
+                        acceptanceCase.rawValue,
+                    ]
+                ),
+                acceptanceCase
+            )
+        }
+        XCTAssertNil(
+            PrivilegedHelperAcceptanceCase.parse(
+                [
+                    "iPhoneLocationMove",
+                    "--privileged-helper-acceptance-case",
+                    "run-command",
+                    "/tmp/payload",
+                ]
+            )
+        )
+        XCTAssertNil(
+            PrivilegedHelperAcceptanceCase.parse(
+                [
+                    "iPhoneLocationMove",
+                    "--privileged-helper-acceptance-case",
+                    "positive-start",
+                    "--output",
+                    "/tmp/result.json",
+                ]
+            )
+        )
+    }
+
+    func testPrivilegedNegativeAcceptanceCasesRequireTheirSpecificFailure() {
+        XCTAssertTrue(
+            PrivilegedHelperAcceptanceCase.endpointTimeout.acceptsExpectedFailure(
+                DeviceLocationError.timeout
+            )
+        )
+        XCTAssertFalse(
+            PrivilegedHelperAcceptanceCase.endpointTimeout.acceptsExpectedFailure(
+                DeviceLocationError.tunnelFailure(
+                    "The tunnel process exited before becoming ready."
+                )
+            )
+        )
+        XCTAssertTrue(
+            PrivilegedHelperAcceptanceCase.runtimeSealTamper.acceptsExpectedFailure(
+                DeviceLocationError.tunnelFailure(
+                    "Generated runtime file set does not match its seal."
+                )
+            )
+        )
+        XCTAssertFalse(
+            PrivilegedHelperAcceptanceCase.runtimeSealTamper.acceptsExpectedFailure(
+                DeviceLocationError.authorizationDenied
+            )
+        )
+    }
+
     func testClosingMainWindowDoesNotStopActiveSimulation() async {
         let recorder = LifecycleEventRecorder()
         let simulation = FakeLifecycleSimulation(
