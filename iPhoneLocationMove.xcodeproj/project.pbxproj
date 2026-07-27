@@ -32,6 +32,7 @@
 		A5F2A55593778AFD042F1A85 /* tunnel-wheelhouse in Resources */ = {isa = PBXBuildFile; fileRef = C8C4ECB67326C161E706128F /* tunnel-wheelhouse */; };
 		A6E3AC8C343979214018378E /* DeviceLocationClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72A0E5881085DB7B1C63F12B /* DeviceLocationClient.swift */; };
 		AACFEFE0B35594A274809A25 /* helper.py in Resources */ = {isa = PBXBuildFile; fileRef = D8BA53EE3A34DE7EDA38BD17 /* helper.py */; };
+		B4D3E8595FFB87601018AFD7 /* ContentViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1891D69959EE82CD27769016 /* ContentViewTests.swift */; };
 		B9C08CE6E544F465DE98CE40 /* LocationMapModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B12E4A8F3296E1234B086F0 /* LocationMapModelTests.swift */; };
 		C3102FD1AF4B1E7F759ED3B8 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8E777568830D696D1D18D0D /* ContentView.swift */; };
 		CAEB1F692BECCCE41023D6D5 /* RuntimeManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3F827030D0A13106F2B46DB /* RuntimeManagerTests.swift */; };
@@ -77,6 +78,7 @@
 /* Begin PBXFileReference section */
 		08D191987B2ADAA379934BC0 /* LocationMapModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationMapModel.swift; sourceTree = "<group>"; };
 		0C949097E4B2497F02969D6E /* TunnelXPCInterfaceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelXPCInterfaceTests.swift; sourceTree = "<group>"; };
+		1891D69959EE82CD27769016 /* ContentViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentViewTests.swift; sourceTree = "<group>"; };
 		1B47024B88A1CC74782D38DE /* iPhoneLocationMoveApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = iPhoneLocationMoveApp.swift; sourceTree = "<group>"; };
 		1C7D8072741EFD7D6A681120 /* pymobiledevice3.lock */ = {isa = PBXFileReference; lastKnownFileType = text; path = pymobiledevice3.lock; sourceTree = "<group>"; };
 		1CDBBA81AE3E6BE73470D85C /* DeviceLocationClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceLocationClientTests.swift; sourceTree = "<group>"; };
@@ -188,6 +190,7 @@
 			children = (
 				88BE49BA668D9D29110B9B5B /* AppLifecycleTests.swift */,
 				229985E2E69AB9F9000ECA8F /* AppShellTests.swift */,
+				1891D69959EE82CD27769016 /* ContentViewTests.swift */,
 				F0F938399DFC8422804B8D35 /* DeviceFailurePresentationTests.swift */,
 				1CDBBA81AE3E6BE73470D85C /* DeviceLocationClientTests.swift */,
 				6B633D730DAB0504455DEA1D /* DeviceSetupStoreTests.swift */,
@@ -426,6 +429,7 @@
 			files = (
 				DE6187A6A0C69C354BA935AC /* AppLifecycleTests.swift in Sources */,
 				122F228494002D4F87F549CC /* AppShellTests.swift in Sources */,
+				B4D3E8595FFB87601018AFD7 /* ContentViewTests.swift in Sources */,
 				A5CC7596CF305F519D458A27 /* DeviceFailurePresentationTests.swift in Sources */,
 				2A86F130158D0A644255AA70 /* DeviceLocationClientTests.swift in Sources */,
 				6F94C46D9D51C7505BA5EF1B /* DeviceSetupStoreTests.swift in Sources */,

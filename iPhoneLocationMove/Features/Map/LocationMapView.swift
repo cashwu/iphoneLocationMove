@@ -511,6 +511,13 @@ private struct DisconnectedSimulationControls: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("simulation-controls-disconnected")
+        .background(
+            AccessibilityIdentifierMarker(
+                identifier: "simulation-controls-disconnected"
+            )
+        )
     }
 }
 
@@ -568,6 +575,13 @@ private struct SimulationControls: View {
                     .foregroundStyle(.red)
             }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("simulation-controls-connected")
+        .background(
+            AccessibilityIdentifierMarker(
+                identifier: "simulation-controls-connected"
+            )
+        )
         .confirmationDialog(
             confirmationTitle,
             isPresented: Binding(
@@ -882,6 +896,20 @@ extension RoutePreview {
             )
         }
         try self.init(points: points)
+    }
+}
+
+private struct AccessibilityIdentifierMarker: NSViewRepresentable {
+    let identifier: String
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.setAccessibilityIdentifier(identifier)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        nsView.setAccessibilityIdentifier(identifier)
     }
 }
 

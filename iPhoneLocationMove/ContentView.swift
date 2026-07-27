@@ -6,11 +6,7 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             if let setupStore = appDelegate.setupStore {
-                DeviceSetupView(store: setupStore)
-                Divider()
-                LocationMapView(
-                    simulationStore: setupStore.simulationStore
-                )
+                DeviceSetupContentView(store: setupStore)
             } else if let configurationFailure = appDelegate.configurationFailure {
                 VStack(spacing: 12) {
                     Image(systemName: "exclamationmark.triangle")
@@ -43,6 +39,20 @@ struct ContentView: View {
             }
         } message: {
             Text(appDelegate.riskNoticeStore.firstUseNotice.message)
+        }
+    }
+}
+
+struct DeviceSetupContentView: View {
+    @ObservedObject var store: DeviceSetupStore
+
+    var body: some View {
+        VStack(spacing: 0) {
+            DeviceSetupView(store: store)
+            Divider()
+            LocationMapView(
+                simulationStore: store.simulationStore
+            )
         }
     }
 }
