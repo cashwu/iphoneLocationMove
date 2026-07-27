@@ -238,6 +238,7 @@ If no argument is provided, the workflow will extract requirements from conversa
 
 9. **Sub-Agent Review/Rating/Fix Loop**
 
+<!-- REVIEW-GATE:BEGIN -->
    Run this review/rating/fix loop once per change, after the normal workflow has completed its required artifact or task work.
 
    **Entry conditions**
@@ -412,6 +413,9 @@ If no argument is provided, the workflow will extract requirements from conversa
      - `.agents/skills/cash-propose/SKILL.md`
      - `.agents/skills/cash-apply/SKILL.md`
      - `.cash.yaml`
+     - `scripts/cash-skills/blocks/review-gate.md`
+     - `scripts/cash-skills/generate.fish`
+     - `scripts/cash-skills/variant-rules.yaml`
      - `scripts/cash-skills/tests/skill-checks.fish`
      - `scripts/cash-cli/tests/cli-checks.fish`
      - `openspec/specs/`
@@ -460,6 +464,7 @@ If no argument is provided, the workflow will extract requirements from conversa
    - **Signal file schema**: Each signal file has frontmatter with `id` (= slug), `type` (default `recurring-finding` for review-loop-written signals), `status`, `occurrences`, `first_seen`, `last_seen`, `links`, and optional human-authored `check`; followed by a title, a description paragraph, and a `## Occurrences` section. New signals created by this step MUST NOT contain an automatically authored `check`.
    - 寫入 signals 後，record every signal file this step created or updated。將路徑轉為 project-root-relative，濾除所有 `openspec/changes/` 下的路徑；若濾除後為空，不呼叫 Cash CLI 且不產生警告。否則先執行 `"$cash_cli" touched ensure "<change-name>"`，再以所有候選路徑執行 `"$cash_cli" touched record "<change-name>" --path <path>`；整批失敗時逐路徑重試，以記錄最大合法子集。`touched ensure` 或 `touched record` 失敗時印出警告並繼續，不使 workflow 失敗，也不改變任何 round file 的 `decision`；警告須列出未能記錄的路徑與 `error.code`，並 carry this warning into the final completion output。
    - **Failure handling**: If writing under `openspec/signals/` fails, print a warning but do NOT fail the cash workflow — signals are an auxiliary layer. If there are no qualifying findings, write nothing.
+<!-- REVIEW-GATE:END -->
 
 10. **Finish the cash proposal workflow**
 
