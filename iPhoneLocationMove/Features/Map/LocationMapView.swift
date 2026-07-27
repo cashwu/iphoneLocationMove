@@ -118,18 +118,25 @@ struct LocationMapView: View {
                 Text("地圖與路線")
                     .font(.title2)
 
-                Button("到 Mac 位置") {
-                    do {
-                        try model.requestMacRecenter()
-                        message = nil
-                    } catch {
-                        show(error)
+                VStack(alignment: .leading, spacing: 8) {
+                    Button("到 Mac 位置") {
+                        do {
+                            try model.requestMacRecenter()
+                            message = nil
+                        } catch {
+                            show(error)
+                        }
                     }
-                }
-                .disabled(!model.canRecenterOnMac)
-                .accessibilityIdentifier("mac-recenter-button")
+                    .disabled(!model.canRecenterOnMac)
+                    .accessibilityIdentifier("mac-recenter-button")
+                    .mapSidebarPrimaryActionLayout()
+                    .testingLayoutRegion("sidebar-button-mac-recenter")
 
-                resetControl
+                    resetControl
+                        .mapSidebarPrimaryActionLayout()
+                        .testingLayoutRegion("sidebar-button-reset")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 searchControls
                 searchResults
@@ -151,11 +158,13 @@ struct LocationMapView: View {
                     Text(message)
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                        .testingLayoutRegion("sidebar-workspace-message-region")
                 }
                 if let macLocationMessage = macLocationCoordinator.message {
                     Text(macLocationMessage)
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                        .testingLayoutRegion("sidebar-device-status-region")
                 }
             }
             .padding()
@@ -169,11 +178,15 @@ struct LocationMapView: View {
                     isOn: roundTrip,
                     action: {}
                 )
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
                 TestingActionMarker(
                     identifier: "workspace-reset-confirmation-action",
                     isEnabled: isResetConfirmationPresented,
                     action: performConfirmedResetForTesting
                 )
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
                 #endif
             }
         }
@@ -186,9 +199,10 @@ struct LocationMapView: View {
                 .accessibilityIdentifier("workspace-search-query")
                 .onSubmit(performSearch)
 
-            HStack {
+            HStack(spacing: 8) {
                 Button("搜尋", action: performSearch)
                     .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .testingLayoutRegion("sidebar-button-search")
                 Button("清除") {
                     cancelSearch()
                     cancelPreviewAddressLookup()
@@ -200,7 +214,9 @@ struct LocationMapView: View {
                         show(error)
                     }
                 }
+                .testingLayoutRegion("sidebar-button-clear-search")
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -213,7 +229,7 @@ struct LocationMapView: View {
                 ForEach(
                     Array(model.searchResults.enumerated()),
                     id: \.offset
-                ) { _, place in
+                ) { offset, place in
                     Button {
                         selectSearchResult(place)
                     } label: {
@@ -226,6 +242,7 @@ struct LocationMapView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .buttonStyle(.plain)
+                    .testingLayoutRegion("sidebar-button-search-result-\(offset)")
                 }
             }
         }
@@ -243,14 +260,17 @@ struct LocationMapView: View {
                     Text("選點只會更新預覽；必須另行確認後才會改變 iPhone 位置。")
                         .font(.caption)
 
-                    HStack {
+                    HStack(spacing: 8) {
                         Button("設為 A") {
                             assignPreview(to: .a)
                         }
+                        .testingLayoutRegion("sidebar-button-endpoint-a")
                         Button("設為 B") {
                             assignPreview(to: .b)
                         }
+                        .testingLayoutRegion("sidebar-button-endpoint-b")
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -266,6 +286,8 @@ struct LocationMapView: View {
 
             Button("建立步行路線", action: performDirections)
                 .disabled(model.endpointSnapshot == nil)
+                .mapSidebarPrimaryActionLayout()
+                .testingLayoutRegion("sidebar-button-directions")
         }
     }
 
@@ -277,6 +299,7 @@ struct LocationMapView: View {
                 Text(String(format: "%.1f km/h", model.walkingSpeedKilometersPerHour))
                     .monospacedDigit()
             }
+            .testingLayoutRegion("sidebar-speed-region")
             Slider(
                 value: Binding(
                     get: { model.walkingSpeedKilometersPerHour },
@@ -327,7 +350,10 @@ struct LocationMapView: View {
             case .transientFailure(let message):
                 Text(message)
                     .foregroundStyle(.red)
+                    .testingLayoutRegion("sidebar-route-error-region")
                 Button("重試", action: performDirections)
+                    .mapSidebarPrimaryActionLayout()
+                    .testingLayoutRegion("sidebar-button-directions-retry")
             }
         }
     }
@@ -678,6 +704,8 @@ struct LocationMapView: View {
                     isEnabled: true,
                     action: presentResetConfirmation
                 )
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
                 #endif
             }
             .accessibilityIdentifier("workspace-reset-button")
@@ -712,6 +740,8 @@ private struct ObservedWorkspaceResetButton: View {
                     isEnabled: !simulationIsBusy(simulationStore.state),
                     action: presentConfirmation
                 )
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
                 #endif
                 if case .stopping(_, .some) = simulationStore.state {
                     AccessibilityIdentifierMarker(
@@ -737,13 +767,18 @@ private struct DisconnectedSimulationControls: View {
                 .font(.headline)
             Button("設定位置") {}
                 .disabled(true)
+                .mapSidebarPrimaryActionLayout()
+                .testingLayoutRegion("sidebar-button-set-location")
             Toggle("往返循環", isOn: $roundTrip)
                 .disabled(true)
             Button("開始步行路線") {}
                 .disabled(true)
+                .mapSidebarPrimaryActionLayout()
+                .testingLayoutRegion("sidebar-button-start-route")
             Text("完成裝置準備後即可使用定位控制。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+                .testingLayoutRegion("sidebar-device-status-region")
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("simulation-controls-disconnected")
@@ -783,6 +818,8 @@ private struct SimulationControls: View {
                     pendingMutation = .point(coordinate)
                 }
                 .disabled(isBusy)
+                .mapSidebarPrimaryActionLayout()
+                .testingLayoutRegion("sidebar-button-set-location")
             }
 
             Toggle("往返循環", isOn: $roundTrip)
@@ -797,6 +834,8 @@ private struct SimulationControls: View {
                     ) {
                         roundTrip.toggle()
                     }
+                    .frame(width: 0, height: 0)
+                    .allowsHitTesting(false)
                     #endif
                 }
 
@@ -810,15 +849,19 @@ private struct SimulationControls: View {
                 }
             }
             .disabled(!mapModel.canStartRoute || isBusy)
+            .mapSidebarPrimaryActionLayout()
+            .testingLayoutRegion("sidebar-button-start-route")
 
             routeActionButtons
 
             simulationStatus
+                .testingLayoutRegion("sidebar-simulation-status-region")
 
             if let message {
                 Text(message)
                     .font(.callout)
                     .foregroundStyle(.red)
+                    .testingLayoutRegion("sidebar-simulation-message-region")
             }
         }
         .accessibilityElement(children: .contain)
@@ -854,7 +897,7 @@ private struct SimulationControls: View {
     @ViewBuilder
     private var routeActionButtons: some View {
         if let route = simulationStore.routeSnapshot {
-            HStack {
+            HStack(spacing: 8) {
                 switch route.phase {
                 case .running:
                     Button("暫停") {
@@ -865,6 +908,7 @@ private struct SimulationControls: View {
                             show(error)
                         }
                     }
+                    .testingLayoutRegion("sidebar-button-pause-route")
                 case .paused:
                     Button("繼續") {
                         do {
@@ -876,10 +920,12 @@ private struct SimulationControls: View {
                             show(error)
                         }
                     }
+                    .testingLayoutRegion("sidebar-button-resume-route")
                 default:
                     EmptyView()
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
 
         if hasCleanupOwnership {
@@ -887,6 +933,8 @@ private struct SimulationControls: View {
                 pendingMutation = .stop
             }
             .disabled(isStoppingWithoutFailure)
+            .mapSidebarPrimaryActionLayout()
+            .testingLayoutRegion("sidebar-button-stop-simulation")
         }
     }
 
@@ -925,6 +973,7 @@ private struct SimulationControls: View {
                     Text(failureText(failure))
                         .font(.callout)
                         .foregroundStyle(.red)
+                        .testingLayoutRegion("sidebar-simulation-error-region")
                 }
             }
         case .interrupted(_, let interruption, let failure):
@@ -937,6 +986,7 @@ private struct SimulationControls: View {
                 Text(failureText(failure))
                     .font(.caption)
             }
+            .testingLayoutRegion("sidebar-simulation-error-region")
         case .stopping(_, let failure):
             if let failure {
                 VStack(alignment: .leading, spacing: 4) {
@@ -945,6 +995,7 @@ private struct SimulationControls: View {
                     Text(failureText(failure))
                         .font(.caption)
                 }
+                .testingLayoutRegion("sidebar-simulation-error-region")
             } else {
                 ProgressView("正在清除模擬定位…")
             }
@@ -1107,6 +1158,24 @@ private func simulationFailureText(_ failure: DeviceLocationError) -> String {
     return "\(presentation.title)：\(presentation.message)"
 }
 
+private extension View {
+    func mapSidebarPrimaryActionLayout() -> some View {
+        frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    func testingLayoutRegion(_ identifier: String) -> some View {
+        #if DEBUG
+        background(
+            TestingLayoutRegionMarker(identifier: identifier)
+                .allowsHitTesting(false)
+        )
+        #else
+        self
+        #endif
+    }
+}
+
 extension RoutePreview {
     init(mapPreview: MapRoutePreview) throws {
         guard mapPreview.polyline.count >= 2,
@@ -1174,6 +1243,48 @@ private struct AccessibilityIdentifierMarker: NSViewRepresentable {
 }
 
 #if DEBUG
+final class TestingActionButton: NSButton {
+    override var intrinsicContentSize: NSSize {
+        .zero
+    }
+
+    override var acceptsFirstResponder: Bool {
+        false
+    }
+}
+
+final class TestingLayoutRegionView: NSView {
+    override var intrinsicContentSize: NSSize {
+        .zero
+    }
+
+    override var acceptsFirstResponder: Bool {
+        false
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+}
+
+private struct TestingLayoutRegionMarker: NSViewRepresentable {
+    let identifier: String
+
+    func makeNSView(context: Context) -> TestingLayoutRegionView {
+        let view = TestingLayoutRegionView()
+        view.setAccessibilityElement(false)
+        view.setAccessibilityIdentifier(identifier)
+        return view
+    }
+
+    func updateNSView(
+        _ view: TestingLayoutRegionView,
+        context: Context
+    ) {
+        view.setAccessibilityIdentifier(identifier)
+    }
+}
+
 private struct TestingActionMarker: NSViewRepresentable {
     let identifier: String
     let isEnabled: Bool
@@ -1196,16 +1307,23 @@ private struct TestingActionMarker: NSViewRepresentable {
         Coordinator(action: action)
     }
 
-    func makeNSView(context: Context) -> NSButton {
-        let button = NSButton()
+    func makeNSView(context: Context) -> TestingActionButton {
+        let button = TestingActionButton()
+        button.title = ""
         button.isBordered = false
+        button.focusRingType = .none
+        button.alphaValue = 0
+        button.refusesFirstResponder = true
         button.setAccessibilityElement(false)
         button.target = context.coordinator
         button.action = #selector(Coordinator.performAction)
         return button
     }
 
-    func updateNSView(_ button: NSButton, context: Context) {
+    func updateNSView(
+        _ button: TestingActionButton,
+        context: Context
+    ) {
         context.coordinator.action = action
         button.setAccessibilityIdentifier(identifier)
         button.isEnabled = isEnabled

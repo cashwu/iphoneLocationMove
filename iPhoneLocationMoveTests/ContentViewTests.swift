@@ -6,6 +6,160 @@ import XCTest
 
 @MainActor
 final class ContentViewTests: XCTestCase {
+    func testDisconnectedSidebarTestingViewsDoNotAffectLayout() async throws {
+        let (hostingView, window) = makeMapHostingView()
+        defer { removeFromWindow(window) }
+
+        await waitForViewUpdate(hostingView)
+
+        try assertSidebarLayout(
+            in: hostingView,
+            requiredRegions: [
+                "sidebar-device-status-region",
+                "sidebar-speed-region",
+            ],
+            requiredPrimaryButtonIdentifiers: [
+                "sidebar-button-mac-recenter",
+                "sidebar-button-reset",
+                "sidebar-button-directions",
+                "sidebar-button-set-location",
+                "sidebar-button-start-route",
+            ]
+        )
+        assertTestingActionButtons(in: hostingView)
+        attachSnapshot(of: hostingView, name: "sidebar-disconnected")
+    }
+
+    func testConnectedSidebarRelayoutsObservedSimulationStates() async throws {
+        let device = ResetTestSimulationDevice()
+        let store = makeSimulationStore(device: device)
+        let (hostingView, window) = makeMapHostingView(
+            simulationStore: store,
+            model: try configuredRouteModel()
+        )
+        defer { removeFromWindow(window) }
+
+        await waitForViewUpdate(hostingView)
+        try assertSidebarLayout(
+            in: hostingView,
+            requiredRegions: [
+                "sidebar-speed-region",
+                "sidebar-simulation-status-region",
+            ],
+            requiredPrimaryButtonIdentifiers: [
+                "sidebar-button-mac-recenter",
+                "sidebar-button-reset",
+                "sidebar-button-directions",
+                "sidebar-button-set-location",
+            ]
+        )
+        assertTestingActionButtons(in: hostingView)
+        attachSnapshot(of: hostingView, name: "sidebar-connected-idle")
+
+        await device.suspendNextSet()
+        let starting = Task {
+            await store.confirmPoint(
+                try! DeviceCoordinate(latitude: 25, longitude: 121),
+                riskAccepted: true
+            )
+        }
+        await device.waitForSetCount(1)
+        await waitForViewUpdate(hostingView)
+        scrollSidebarToBottom(in: hostingView)
+        await waitForViewUpdate(hostingView)
+        try assertSidebarLayout(
+            in: hostingView,
+            requiredRegions: [
+                "sidebar-speed-region",
+                "sidebar-simulation-status-region",
+            ],
+            requiredPrimaryButtonIdentifiers: [
+                "sidebar-button-directions",
+                "sidebar-button-set-location",
+                "sidebar-button-start-route",
+            ]
+        )
+        assertTestingActionButtons(in: hostingView)
+        attachSnapshot(of: hostingView, name: "sidebar-connected-busy")
+        await device.resumeSet()
+        await starting.value
+
+        try await store.startRoute(
+            preview: routePreview(),
+            speedKilometersPerHour: 4.5,
+            roundTrip: false,
+            riskAccepted: true
+        )
+        await waitForViewUpdate(hostingView)
+        scrollSidebarToBottom(in: hostingView)
+        await waitForViewUpdate(hostingView)
+        try assertSidebarLayout(
+            in: hostingView,
+            requiredRegions: [
+                "sidebar-speed-region",
+                "sidebar-simulation-status-region",
+            ],
+            requiredPrimaryButtonIdentifiers: [
+                "sidebar-button-directions",
+                "sidebar-button-set-location",
+                "sidebar-button-start-route",
+                "sidebar-button-pause-route",
+                "sidebar-button-stop-simulation",
+            ]
+        )
+        assertTestingActionButtons(in: hostingView)
+
+        try store.pause()
+        guard await waitForRoutePhase(
+            .paused,
+            showing: "sidebar-button-resume-route",
+            in: store,
+            hostingView: hostingView
+        ) else {
+            return XCTFail("Paused route controls did not finish rendering")
+        }
+        await waitForViewUpdate(hostingView)
+        try assertSidebarLayout(
+            in: hostingView,
+            requiredRegions: [
+                "sidebar-speed-region",
+                "sidebar-simulation-status-region",
+            ],
+            requiredPrimaryButtonIdentifiers: [
+                "sidebar-button-directions",
+                "sidebar-button-set-location",
+                "sidebar-button-start-route",
+                "sidebar-button-resume-route",
+                "sidebar-button-stop-simulation",
+            ]
+        )
+        assertTestingActionButtons(in: hostingView)
+
+        await device.failNextClear(.clearFailed("layout-test"))
+        await store.stop()
+        await waitForViewUpdate(hostingView)
+        guard case .stopping(_, let failure?) = store.state else {
+            return XCTFail("Expected stopping failure")
+        }
+        XCTAssertEqual(failure, .clearFailed("layout-test"))
+        try assertSidebarLayout(
+            in: hostingView,
+            requiredRegions: [
+                "sidebar-speed-region",
+                "sidebar-simulation-status-region",
+                "sidebar-simulation-error-region",
+            ],
+            requiredPrimaryButtonIdentifiers: [
+                "sidebar-button-directions",
+                "sidebar-button-set-location",
+                "sidebar-button-start-route",
+                "sidebar-button-stop-simulation",
+            ]
+        )
+        assertTestingActionButtons(in: hostingView)
+        attachSnapshot(of: hostingView, name: "sidebar-clear-failure")
+    }
+
     func testResetConfirmationClearsSearchAndTurnsOffRoundTrip() async throws {
         let model = try configuredRouteModel()
         let (hostingView, window) = makeMapHostingView(
@@ -411,6 +565,27 @@ final class ContentViewTests: XCTestCase {
         }
     }
 
+    private func waitForRoutePhase(
+        _ phase: RouteSessionPhase,
+        showing layoutRegionIdentifier: String,
+        in store: SimulationStore,
+        hostingView: NSView
+    ) async -> Bool {
+        for _ in 0 ..< 100 {
+            hostingView.window?.displayIfNeeded()
+            if store.routeSnapshot?.phase == phase,
+               containsViewIdentifier(
+                   layoutRegionIdentifier,
+                   in: hostingView
+               )
+            {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return false
+    }
+
     private func findButton(
         in root: NSView,
         identifier: String
@@ -423,6 +598,208 @@ final class ContentViewTests: XCTestCase {
         return root.subviews.lazy.compactMap {
             self.findButton(in: $0, identifier: identifier)
         }.first
+    }
+
+    private func allSubviews(in root: NSView) -> [NSView] {
+        root.subviews.flatMap { [$0] + allSubviews(in: $0) }
+    }
+
+    private func scrollSidebarToBottom(in hostingView: NSView) {
+        guard
+            let scrollView = allSubviews(in: hostingView)
+                .compactMap({ $0 as? NSScrollView })
+                .first(where: {
+                    let frame = $0.convert($0.bounds, to: hostingView)
+                    return frame.minX < 320
+                        && frame.width <= 320
+                        && ($0.documentView?.bounds.height ?? 0)
+                            > $0.contentView.bounds.height
+                }),
+            let documentView = scrollView.documentView
+        else {
+            return
+        }
+        let bottomY = max(
+            documentView.bounds.minY,
+            documentView.bounds.maxY - scrollView.contentView.bounds.height
+        )
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: bottomY))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
+    private func assertSidebarLayout(
+        in hostingView: NSView,
+        requiredRegions: Set<String>,
+        requiredPrimaryButtonIdentifiers: Set<String> = [],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let sidebarBounds = NSRect(
+            x: 0,
+            y: 0,
+            width: 320,
+            height: hostingView.bounds.height
+        )
+        let regions = allSubviews(in: hostingView).compactMap {
+            $0 as? TestingLayoutRegionView
+        }
+        let buttonFrames = regions.compactMap { region -> (String, NSRect)? in
+            let identifier = region.accessibilityIdentifier()
+            guard identifier.hasPrefix("sidebar-button-") else {
+                return nil
+            }
+            let frame = region.convert(region.bounds, to: hostingView)
+            return frame.intersects(sidebarBounds) ? (identifier, frame) : nil
+        }
+        XCTAssertFalse(buttonFrames.isEmpty, file: file, line: line)
+
+        for (identifier, frame) in buttonFrames {
+            XCTAssertGreaterThanOrEqual(
+                frame.minX,
+                sidebarBounds.minX - 1,
+                identifier,
+                file: file,
+                line: line
+            )
+            XCTAssertLessThanOrEqual(
+                frame.maxX,
+                sidebarBounds.maxX + 1,
+                identifier,
+                file: file,
+                line: line
+            )
+        }
+
+        for firstIndex in buttonFrames.indices {
+            for secondIndex in buttonFrames.indices where secondIndex > firstIndex {
+                let first = buttonFrames[firstIndex]
+                let second = buttonFrames[secondIndex]
+                let intersection = first.1.intersection(second.1)
+                XCTAssertTrue(
+                    intersection.isNull
+                        || intersection.width <= 1
+                        || intersection.height <= 1,
+                    "\(first.0) overlaps \(second.0)",
+                    file: file,
+                    line: line
+                )
+
+                let verticalOverlap = min(first.1.maxY, second.1.maxY)
+                    - max(first.1.minY, second.1.minY)
+                if verticalOverlap > 1 {
+                    let horizontalGap = max(
+                        second.1.minX - first.1.maxX,
+                        first.1.minX - second.1.maxX
+                    )
+                    XCTAssertGreaterThanOrEqual(
+                        horizontalGap,
+                        7,
+                        "\(first.0) row spacing \(second.0)",
+                        file: file,
+                        line: line
+                    )
+                }
+            }
+        }
+
+        let regionIdentifiers = Set(
+            regions.map { $0.accessibilityIdentifier() }
+        )
+        XCTAssertTrue(
+            requiredRegions.isSubset(of: regionIdentifiers),
+            "Missing layout regions: \(requiredRegions.subtracting(regionIdentifiers))",
+            file: file,
+            line: line
+        )
+        for region in regions {
+            let regionIdentifier = region.accessibilityIdentifier()
+            guard !regionIdentifier.hasPrefix("sidebar-button-") else {
+                continue
+            }
+            let regionFrame = region.convert(region.bounds, to: hostingView)
+            guard regionFrame.intersects(sidebarBounds) else {
+                continue
+            }
+            for (buttonIdentifier, buttonFrame) in buttonFrames {
+                let intersection = buttonFrame.intersection(regionFrame)
+                XCTAssertTrue(
+                    intersection.isNull
+                        || intersection.width <= 1
+                        || intersection.height <= 1,
+                    "\(buttonIdentifier) overlaps \(regionIdentifier)",
+                    file: file,
+                    line: line
+                )
+            }
+        }
+
+        let primaryFrames = buttonFrames.filter {
+            requiredPrimaryButtonIdentifiers.contains($0.0)
+        }
+        XCTAssertEqual(
+            Set(primaryFrames.map(\.0)),
+            requiredPrimaryButtonIdentifiers,
+            file: file,
+            line: line
+        )
+        if let baseline = primaryFrames.first?.1.minX {
+            for (identifier, frame) in primaryFrames.dropFirst() {
+                XCTAssertEqual(
+                    frame.minX,
+                    baseline,
+                    accuracy: 1,
+                    identifier,
+                    file: file,
+                    line: line
+                )
+            }
+        }
+    }
+
+    private func assertTestingActionButtons(
+        in hostingView: NSView,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let markers = allSubviews(in: hostingView).compactMap {
+            $0 as? TestingActionButton
+        }
+        XCTAssertFalse(markers.isEmpty, file: file, line: line)
+        for marker in markers {
+            XCTAssertEqual(marker.frame.width, 0, accuracy: 1, file: file, line: line)
+            XCTAssertEqual(marker.frame.height, 0, accuracy: 1, file: file, line: line)
+            XCTAssertEqual(marker.alphaValue, 0, file: file, line: line)
+            XCTAssertTrue(marker.focusRingType == .none, file: file, line: line)
+            XCTAssertFalse(marker.acceptsFirstResponder, file: file, line: line)
+            XCTAssertTrue(marker.refusesFirstResponder, file: file, line: line)
+            XCTAssertFalse(marker.isAccessibilityElement(), file: file, line: line)
+        }
+    }
+
+    private func attachSnapshot(of view: NSView, name: String) {
+        guard
+            let representation = view.bitmapImageRepForCachingDisplay(
+                in: view.bounds
+            )
+        else {
+            return XCTFail("Unable to create \(name) bitmap")
+        }
+        view.cacheDisplay(in: view.bounds, to: representation)
+        guard
+            let data = representation.representation(
+                using: .png,
+                properties: [:]
+            )
+        else {
+            return XCTFail("Unable to encode \(name) bitmap")
+        }
+        let attachment = XCTAttachment(
+            data: data,
+            uniformTypeIdentifier: "public.png"
+        )
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     private func findTextField(
