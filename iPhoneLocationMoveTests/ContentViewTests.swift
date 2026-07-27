@@ -8,7 +8,12 @@ final class ContentViewTests: XCTestCase {
     func testSetupReadyReplacesDisconnectedControlsInSameHostingView() async throws {
         let store = try makeStore()
         let hostingView = NSHostingView(
-            rootView: DeviceSetupContentView(store: store)
+            rootView: LocationWorkspaceView(
+                store: store,
+                macLocationCoordinator: MacLocationCoordinator(
+                    provider: ContentViewMacLocationProvider()
+                )
+            )
         )
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 620),
@@ -134,6 +139,13 @@ final class ContentViewTests: XCTestCase {
             return true
         }
         return false
+    }
+}
+
+@MainActor
+private struct ContentViewMacLocationProvider: MacLocationProviding {
+    func requestCurrentLocation() async throws -> MapCoordinate {
+        throw MacLocationClientError.locationServicesDisabled
     }
 }
 
