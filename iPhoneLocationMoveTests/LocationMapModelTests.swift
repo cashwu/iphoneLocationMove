@@ -367,6 +367,170 @@ final class LocationMapModelTests: XCTestCase {
         XCTAssertNil(model.macInitialCenterIntent)
     }
 
+    func testMacRecenterRequiresCurrentMacLocation() {
+        let model = LocationMapModel()
+
+        XCTAssertThrowsError(try model.requestMacRecenter()) { error in
+            XCTAssertEqual(error as? LocationMapError, .macLocationUnavailable)
+        }
+        XCTAssertFalse(model.canRecenterOnMac)
+        XCTAssertNil(model.macRecenterIntent)
+    }
+
+    func testMacRecenterPublishesNewIdentityForEveryRequest() throws {
+        let model = LocationMapModel()
+        let macLocation = coordinate(latitude: 25.05, longitude: 121.55)
+        model.updateMacLocation(
+            macLocation,
+            for: DeviceSessionGeneration(rawValue: 1)
+        )
+
+        try model.requestMacRecenter()
+        let firstIntent = try XCTUnwrap(model.macRecenterIntent)
+        try model.requestMacRecenter()
+        let secondIntent = try XCTUnwrap(model.macRecenterIntent)
+
+        XCTAssertTrue(model.canRecenterOnMac)
+        XCTAssertEqual(firstIntent.coordinate, macLocation)
+        XCTAssertEqual(secondIntent.coordinate, macLocation)
+        XCTAssertGreaterThan(secondIntent.generation, firstIntent.generation)
+    }
+
+    func testMacRecenterClearsPendingInitialCenterIntent() throws {
+        let model = LocationMapModel()
+        model.updateMacLocation(
+            coordinate(latitude: 25.05, longitude: 121.55),
+            for: DeviceSessionGeneration(rawValue: 1)
+        )
+        XCTAssertNotNil(model.macInitialCenterIntent)
+
+        try model.requestMacRecenter()
+
+        XCTAssertNil(model.macInitialCenterIntent)
+        XCTAssertNotNil(model.macRecenterIntent)
+    }
+
+    func testManualCameraInteractionClearsPendingMacRecenterIntent() throws {
+        let model = LocationMapModel()
+        model.updateMacLocation(
+            coordinate(latitude: 25.05, longitude: 121.55),
+            for: DeviceSessionGeneration(rawValue: 1)
+        )
+        try model.requestMacRecenter()
+
+        model.recordManualCameraInteraction()
+
+        XCTAssertNil(model.macRecenterIntent)
+    }
+
+    func testResetWorkspaceClearsMapStateAndRestoresDefaultSpeed() throws {
+        let model = LocationMapModel()
+        let a = searchPlace(
+            latitude: 25.03,
+            longitude: 121.56,
+            address: "A"
+        )
+        let searchRequest = try model.beginSearch(query: "A")
+        XCTAssertEqual(
+            model.receiveSearchResults([a], for: searchRequest),
+            .applied
+        )
+        try model.selectSearchResult(a, from: searchRequest)
+        try model.assignPreview(to: .a)
+        try model.selectMapCoordinate(
+            coordinate(latitude: 25.04, longitude: 121.57)
+        )
+        try model.assignPreview(to: .b)
+        let directionsRequest = try model.beginDirections()
+        _ = try model.receiveDirections(
+            .routeAvailable(polyline(), distance: 900),
+            for: directionsRequest
+        )
+        try model.setWalkingSpeed(kilometersPerHour: 6)
+
+        let searchGeneration = model.mapSearchGeneration
+        let routeGeneration = model.routeRequestGeneration
+        try model.resetWorkspace()
+
+        XCTAssertNil(model.preview)
+        XCTAssertTrue(model.searchResults.isEmpty)
+        XCTAssertNil(model.endpointA)
+        XCTAssertNil(model.endpointB)
+        XCTAssertNil(model.routePreview)
+        XCTAssertNil(model.routeCameraIdentity)
+        XCTAssertEqual(model.routeStatus, .idle)
+        XCTAssertEqual(model.walkingSpeedKilometersPerHour, 4.5)
+        XCTAssertGreaterThan(model.mapSearchGeneration, searchGeneration)
+        XCTAssertGreaterThan(model.routeRequestGeneration, routeGeneration)
+    }
+
+    func testResetWorkspaceMakesInflightMapResponsesStale() throws {
+        let searchModel = LocationMapModel()
+        let searchRequest = try searchModel.beginSearch(query: "舊搜尋")
+        try searchModel.resetWorkspace()
+        XCTAssertEqual(
+            searchModel.receiveSearchResults(
+                [searchPlace(latitude: 25, longitude: 121, address: "晚到結果")],
+                for: searchRequest
+            ),
+            .stale
+        )
+
+        let previewModel = LocationMapModel()
+        let previewRequest = try previewModel.selectMapCoordinate(
+            coordinate(latitude: 25.03, longitude: 121.56)
+        )
+        try previewModel.resetWorkspace()
+        XCTAssertEqual(
+            previewModel.receivePreviewAddress("晚到地址", for: previewRequest),
+            .stale
+        )
+
+        let directionsModel = try modelWithEndpoints()
+        let directionsRequest = try directionsModel.beginDirections()
+        try directionsModel.resetWorkspace()
+        XCTAssertEqual(
+            try directionsModel.receiveDirections(
+                .routeAvailable(polyline(), distance: 900),
+                for: directionsRequest
+            ),
+            .stale
+        )
+    }
+
+    func testResetWorkspaceRearmsInitialCenterWhenMacLocationIsUnavailable() throws {
+        let model = LocationMapModel()
+        model.recordManualCameraInteraction()
+
+        try model.resetWorkspace()
+        model.updateMacLocation(
+            coordinate(latitude: 25.05, longitude: 121.55),
+            for: DeviceSessionGeneration(rawValue: 1)
+        )
+
+        XCTAssertNotNil(model.macInitialCenterIntent)
+        XCTAssertNil(model.macRecenterIntent)
+    }
+
+    func testResetWorkspacePublishesMacRecenterWhenLocationIsAvailable() throws {
+        let model = LocationMapModel()
+        let macLocation = coordinate(latitude: 25.05, longitude: 121.55)
+        model.updateMacLocation(
+            macLocation,
+            for: DeviceSessionGeneration(rawValue: 1)
+        )
+        model.recordManualCameraInteraction()
+
+        try model.resetWorkspace()
+
+        XCTAssertNil(model.macInitialCenterIntent)
+        XCTAssertEqual(model.macRecenterIntent?.coordinate, macLocation)
+        XCTAssertEqual(
+            model.macRecenterIntent?.generation,
+            model.macRecenterGeneration
+        )
+    }
+
     func testReconnectOnlyUpdatesMarkerAfterInitialCenterIntentWasCreated() throws {
         let model = LocationMapModel()
         let initialCoordinate = coordinate(latitude: 25.05, longitude: 121.55)
@@ -435,6 +599,48 @@ final class LocationMapModelTests: XCTestCase {
         }
 
         XCTAssertEqual(applicationCount, 2)
+    }
+
+    func testCameraEffectsApplyEachMacRecenterIdentityOnce() {
+        let effects = LocationMapCameraEffects()
+        let first = MacRecenterGeneration(rawValue: 1)
+        let second = MacRecenterGeneration(rawValue: 2)
+        var applicationCount = 0
+
+        effects.applyMacRecenter(first) {
+            applicationCount += 1
+        }
+        effects.applyMacRecenter(first) {
+            applicationCount += 1
+        }
+        effects.applyMacRecenter(second) {
+            applicationCount += 1
+        }
+        effects.applyMacRecenter(second) {
+            applicationCount += 1
+        }
+
+        XCTAssertEqual(applicationCount, 2)
+    }
+
+    func testResetConfirmationContentReflectsCleanupOwnership() {
+        let cleanup = ResetConfirmationContent.make(
+            hasCleanupOwnership: true
+        )
+        XCTAssertEqual(cleanup.title, "確認重置並停止模擬？")
+        XCTAssertTrue(
+            cleanup.message.contains(
+                "只有手機回覆 clear 成功後，App 才會顯示已恢復真實定位。"
+            )
+        )
+
+        let localOnly = ResetConfirmationContent.make(
+            hasCleanupOwnership: false
+        )
+        XCTAssertEqual(localOnly.title, "確認重置設定？")
+        XCTAssertTrue(localOnly.message.contains("搜尋"))
+        XCTAssertTrue(localOnly.message.contains("A/B"))
+        XCTAssertTrue(localOnly.message.contains("路線"))
     }
 
     func testProgrammaticCameraChangeIsNotReportedAsManualInteraction() {

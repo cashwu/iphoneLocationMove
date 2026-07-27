@@ -48,6 +48,21 @@ struct RouteRequestGeneration: RawRepresentable, Comparable, Hashable, Sendable 
     }
 }
 
+struct MacRecenterGeneration: RawRepresentable, Comparable, Hashable, Sendable {
+    let rawValue: UInt64
+
+    static func < (lhs: Self, rhs: Self) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+
+    func advanced() throws -> Self {
+        guard rawValue < UInt64.max else {
+            throw LocationMapError.identityExhausted
+        }
+        return Self(rawValue: rawValue + 1)
+    }
+}
+
 struct MapSearchPlace: Equatable, Hashable, Sendable {
     let coordinate: MapCoordinate
     let address: String?
@@ -94,6 +109,11 @@ struct DirectionsRequest: Equatable, Sendable {
 struct MacInitialCenterIntent: Equatable, Sendable {
     let coordinate: MapCoordinate
     let generation: DeviceSessionGeneration
+}
+
+struct MacRecenterIntent: Equatable, Sendable {
+    let coordinate: MapCoordinate
+    let generation: MacRecenterGeneration
 }
 
 enum PedestrianDirectionsResponse: Equatable, Sendable {
@@ -151,6 +171,7 @@ enum LocationMapError: Error, Equatable, Sendable {
     case endpointsMustDiffer
     case staleSearchSelection
     case routePreviewUnavailable
+    case macLocationUnavailable
     case identityExhausted
 }
 
@@ -175,6 +196,8 @@ extension LocationMapError: LocalizedError {
             "搜尋結果已過期，請重新選擇。"
         case .routePreviewUnavailable:
             "目前沒有可確認的步行路線。"
+        case .macLocationUnavailable:
+            "尚未取得 Mac 目前位置。"
         case .identityExhausted:
             "要求識別碼已用盡，請重新啟動 App。"
         }
@@ -194,12 +217,16 @@ final class LocationMapModel: ObservableObject {
     @Published private(set) var routeStatus: MapRouteStatus = .idle
     @Published private(set) var macLocationCoordinate: MapCoordinate?
     @Published private(set) var macInitialCenterIntent: MacInitialCenterIntent?
+    @Published private(set) var macRecenterIntent: MacRecenterIntent?
     @Published private(set) var routeCameraIdentity: RouteRequestGeneration?
     @Published private(set) var walkingSpeedKilometersPerHour: Double
     @Published private(set) var mapSearchGeneration = MapSearchGeneration(
         rawValue: 0
     )
     @Published private(set) var routeRequestGeneration = RouteRequestGeneration(
+        rawValue: 0
+    )
+    @Published private(set) var macRecenterGeneration = MacRecenterGeneration(
         rawValue: 0
     )
 
@@ -242,6 +269,10 @@ final class LocationMapModel: ObservableObject {
             return endpointSnapshot != nil
         }
         return false
+    }
+
+    var canRecenterOnMac: Bool {
+        macLocationCoordinate != nil
     }
 
     func beginSearch(query: String) throws -> MapSearchRequest {
@@ -480,6 +511,51 @@ final class LocationMapModel: ObservableObject {
         recordUserMapContext()
     }
 
+    func requestMacRecenter() throws {
+        guard let macLocationCoordinate else {
+            throw LocationMapError.macLocationUnavailable
+        }
+        recordUserMapContext()
+        macRecenterGeneration = try macRecenterGeneration.advanced()
+        macRecenterIntent = MacRecenterIntent(
+            coordinate: macLocationCoordinate,
+            generation: macRecenterGeneration
+        )
+    }
+
+    func resetWorkspace() throws {
+        let nextSearchGeneration = try mapSearchGeneration.advanced()
+        let nextRouteGeneration = try routeRequestGeneration.advanced()
+        let nextMacRecenterGeneration = try macLocationCoordinate.map { _ in
+            try macRecenterGeneration.advanced()
+        }
+
+        mapSearchGeneration = nextSearchGeneration
+        routeRequestGeneration = nextRouteGeneration
+        activeSearchRequest = nil
+        activeDirectionsRequest = nil
+        preview = nil
+        searchResults = []
+        endpointA = nil
+        endpointB = nil
+        routePreview = nil
+        routeCameraIdentity = nil
+        routeStatus = .idle
+        walkingSpeedKilometersPerHour = Self.defaultWalkingSpeed
+
+        macInitialCenterIntent = nil
+        macRecenterIntent = nil
+        if let macLocationCoordinate, let nextMacRecenterGeneration {
+            macRecenterGeneration = nextMacRecenterGeneration
+            macRecenterIntent = MacRecenterIntent(
+                coordinate: macLocationCoordinate,
+                generation: nextMacRecenterGeneration
+            )
+        } else {
+            userHasMapContext = false
+        }
+    }
+
     private static func isValidSpeed(_ speed: Double) -> Bool {
         speed.isFinite && walkingSpeedRange.contains(speed)
     }
@@ -501,5 +577,6 @@ final class LocationMapModel: ObservableObject {
     private func recordUserMapContext() {
         userHasMapContext = true
         macInitialCenterIntent = nil
+        macRecenterIntent = nil
     }
 }

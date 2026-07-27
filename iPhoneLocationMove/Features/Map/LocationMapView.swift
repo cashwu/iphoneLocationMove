@@ -1,8 +1,26 @@
 import MapKit
 import SwiftUI
 
+struct ResetConfirmationContent: Equatable {
+    let title: String
+    let message: String
+
+    static func make(hasCleanupOwnership: Bool) -> Self {
+        if hasCleanupOwnership {
+            return Self(
+                title: "確認重置並停止模擬？",
+                message: "只有手機回覆 clear 成功後，App 才會顯示已恢復真實定位。"
+            )
+        }
+        return Self(
+            title: "確認重置設定？",
+            message: "將清除搜尋、A/B 端點與路線設定。"
+        )
+    }
+}
+
 struct LocationMapView: View {
-    @StateObject private var model = LocationMapModel()
+    @StateObject private var model: LocationMapModel
     @ObservedObject private var macLocationCoordinator: MacLocationCoordinator
     private let simulationStore: SimulationStore?
     @State private var query = ""
@@ -11,11 +29,22 @@ struct LocationMapView: View {
     @State private var activeGeocoder: CLGeocoder?
     @State private var activeDirections: MKDirections?
     @State private var message: String?
+    @State private var simulationMessage: String?
+    @State private var roundTrip = false
+    @State private var isResetConfirmationPresented = false
+    @State private var resetConfirmationContent =
+        ResetConfirmationContent.make(hasCleanupOwnership: false)
 
     init(
         simulationStore: SimulationStore? = nil,
-        macLocationCoordinator: MacLocationCoordinator = MacLocationCoordinator()
+        macLocationCoordinator: MacLocationCoordinator = MacLocationCoordinator(),
+        model: LocationMapModel = LocationMapModel(),
+        initialQuery: String = "",
+        initialRoundTrip: Bool = false
     ) {
+        _model = StateObject(wrappedValue: model)
+        _query = State(initialValue: initialQuery)
+        _roundTrip = State(initialValue: initialRoundTrip)
         self.simulationStore = simulationStore
         self.macLocationCoordinator = macLocationCoordinator
     }
@@ -35,6 +64,19 @@ struct LocationMapView: View {
         ) { _ in
             synchronizeMacLocation()
         }
+        .confirmationDialog(
+            resetConfirmationContent.title,
+            isPresented: $isResetConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("重置", role: .destructive) {
+                performReset()
+            }
+            .accessibilityIdentifier("workspace-reset-confirm")
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(resetConfirmationContent.message)
+        }
     }
 
     @ViewBuilder
@@ -49,6 +91,7 @@ struct LocationMapView: View {
                 routeCameraIdentity: model.routeCameraIdentity,
                 macLocation: model.macLocationCoordinate,
                 macInitialCenterIntent: model.macInitialCenterIntent,
+                macRecenterIntent: model.macRecenterIntent,
                 onCoordinateSelected: selectMapCoordinate,
                 onManualCameraInteraction: model.recordManualCameraInteraction
             )
@@ -61,6 +104,7 @@ struct LocationMapView: View {
                 routeCameraIdentity: model.routeCameraIdentity,
                 macLocation: model.macLocationCoordinate,
                 macInitialCenterIntent: model.macInitialCenterIntent,
+                macRecenterIntent: model.macRecenterIntent,
                 confirmedRouteMarkerCoordinate: nil,
                 onCoordinateSelected: selectMapCoordinate,
                 onManualCameraInteraction: model.recordManualCameraInteraction
@@ -74,6 +118,19 @@ struct LocationMapView: View {
                 Text("地圖與路線")
                     .font(.title2)
 
+                Button("到 Mac 位置") {
+                    do {
+                        try model.requestMacRecenter()
+                        message = nil
+                    } catch {
+                        show(error)
+                    }
+                }
+                .disabled(!model.canRecenterOnMac)
+                .accessibilityIdentifier("mac-recenter-button")
+
+                resetControl
+
                 searchControls
                 searchResults
                 previewControls
@@ -82,7 +139,9 @@ struct LocationMapView: View {
                 if let simulationStore {
                     SimulationControls(
                         mapModel: model,
-                        simulationStore: simulationStore
+                        simulationStore: simulationStore,
+                        roundTrip: $roundTrip,
+                        message: $simulationMessage
                     )
                 } else {
                     DisconnectedSimulationControls()
@@ -101,12 +160,30 @@ struct LocationMapView: View {
             }
             .padding()
         }
+        .background {
+            ZStack {
+                #if DEBUG
+                TestingActionMarker(
+                    identifier: "round-trip-state",
+                    isEnabled: false,
+                    isOn: roundTrip,
+                    action: {}
+                )
+                TestingActionMarker(
+                    identifier: "workspace-reset-confirmation-action",
+                    isEnabled: isResetConfirmationPresented,
+                    action: performConfirmedResetForTesting
+                )
+                #endif
+            }
+        }
     }
 
     private var searchControls: some View {
         VStack(alignment: .leading, spacing: 8) {
             TextField("搜尋地名或地址", text: $query)
                 .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("workspace-search-query")
                 .onSubmit(performSearch)
 
             HStack {
@@ -533,6 +610,80 @@ struct LocationMapView: View {
         message = error.localizedDescription
     }
 
+    private func performReset() {
+        cancelSearch()
+        cancelPreviewAddressLookup()
+        cancelDirections()
+        do {
+            try model.resetWorkspace()
+            query = ""
+            searchRequest = nil
+            message = nil
+            simulationMessage = nil
+            roundTrip = false
+        } catch {
+            show(error)
+            return
+        }
+
+        guard let simulationStore,
+              simulationHasCleanupOwnership(simulationStore.state)
+        else {
+            return
+        }
+        Task { @MainActor in
+            await simulationStore.stop()
+            if case .stopping(_, let failure) = simulationStore.state,
+               let failure
+            {
+                simulationMessage = simulationFailureText(failure)
+            }
+        }
+    }
+
+    private func presentResetConfirmation() {
+        resetConfirmationContent = ResetConfirmationContent.make(
+            hasCleanupOwnership: simulationStore.map {
+                simulationHasCleanupOwnership($0.state)
+            } ?? false
+        )
+        isResetConfirmationPresented = true
+    }
+
+    #if DEBUG
+    private func performConfirmedResetForTesting() {
+        guard isResetConfirmationPresented else {
+            return
+        }
+        isResetConfirmationPresented = false
+        performReset()
+    }
+    #endif
+
+    @ViewBuilder
+    private var resetControl: some View {
+        if let simulationStore {
+            ObservedWorkspaceResetButton(
+                simulationStore: simulationStore,
+                presentConfirmation: presentResetConfirmation
+            )
+        } else {
+            Button("Reset", role: .destructive) {
+                presentResetConfirmation()
+            }
+            .background {
+                #if DEBUG
+                TestingActionMarker(
+                    identifier: "workspace-reset-button",
+                    isEnabled: true,
+                    action: presentResetConfirmation
+                )
+                #endif
+            }
+            .accessibilityIdentifier("workspace-reset-button")
+        }
+    }
+
     private func synchronizeMacLocation() {
         guard
             let coordinate = macLocationCoordinator.coordinate,
@@ -541,6 +692,38 @@ struct LocationMapView: View {
             return
         }
         model.updateMacLocation(coordinate, for: generation)
+    }
+}
+
+private struct ObservedWorkspaceResetButton: View {
+    @ObservedObject var simulationStore: SimulationStore
+    let presentConfirmation: () -> Void
+
+    var body: some View {
+        Button("Reset", role: .destructive) {
+            presentConfirmation()
+        }
+        .disabled(simulationIsBusy(simulationStore.state))
+        .background {
+            ZStack {
+                #if DEBUG
+                TestingActionMarker(
+                    identifier: "workspace-reset-button",
+                    isEnabled: !simulationIsBusy(simulationStore.state),
+                    action: presentConfirmation
+                )
+                #endif
+                if case .stopping(_, .some) = simulationStore.state {
+                    AccessibilityIdentifierMarker(
+                        identifier: "simulation-cleanup-failure"
+                    )
+                    AccessibilityIdentifierMarker(
+                        identifier: "simulation-cleanup-retry"
+                    )
+                }
+            }
+        }
+        .accessibilityIdentifier("workspace-reset-button")
     }
 }
 
@@ -581,9 +764,9 @@ private struct SimulationControls: View {
 
     @ObservedObject var mapModel: LocationMapModel
     @ObservedObject var simulationStore: SimulationStore
-    @State private var roundTrip = false
+    @Binding var roundTrip: Bool
+    @Binding var message: String?
     @State private var pendingMutation: PendingMutation?
-    @State private var message: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -604,6 +787,18 @@ private struct SimulationControls: View {
 
             Toggle("往返循環", isOn: $roundTrip)
                 .disabled(!mapModel.canStartRoute || isBusy)
+                .accessibilityIdentifier("round-trip-toggle")
+                .background {
+                    #if DEBUG
+                    TestingActionMarker(
+                        identifier: "round-trip-toggle",
+                        isEnabled: mapModel.canStartRoute && !isBusy,
+                        isOn: roundTrip
+                    ) {
+                        roundTrip.toggle()
+                    }
+                    #endif
+                }
 
             Button("開始步行路線") {
                 do {
@@ -757,23 +952,11 @@ private struct SimulationControls: View {
     }
 
     private var isBusy: Bool {
-        switch simulationStore.state {
-        case .starting, .replacing:
-            return true
-        case .stopping(_, nil):
-            return true
-        default:
-            return false
-        }
+        simulationIsBusy(simulationStore.state)
     }
 
     private var hasCleanupOwnership: Bool {
-        switch simulationStore.state {
-        case .pointActive, .route, .interrupted, .stopping:
-            return true
-        case .idle, .starting, .replacing:
-            return false
-        }
+        simulationHasCleanupOwnership(simulationStore.state)
     }
 
     private var isStoppingWithoutFailure: Bool {
@@ -889,13 +1072,39 @@ private struct SimulationControls: View {
     }
 
     private func failureText(_ failure: DeviceLocationError) -> String {
-        let presentation = DeviceFailurePresentation.make(for: failure)
-        return "\(presentation.title)：\(presentation.message)"
+        simulationFailureText(failure)
     }
 
     private func show(_ error: Error) {
         message = error.localizedDescription
     }
+}
+
+private func simulationIsBusy(_ state: SimulationStoreState) -> Bool {
+    switch state {
+    case .starting, .replacing:
+        true
+    case .stopping(_, nil):
+        true
+    default:
+        false
+    }
+}
+
+private func simulationHasCleanupOwnership(
+    _ state: SimulationStoreState
+) -> Bool {
+    switch state {
+    case .pointActive, .route, .interrupted, .stopping:
+        true
+    case .idle, .starting, .replacing:
+        false
+    }
+}
+
+private func simulationFailureText(_ failure: DeviceLocationError) -> String {
+    let presentation = DeviceFailurePresentation.make(for: failure)
+    return "\(presentation.title)：\(presentation.message)"
 }
 
 extension RoutePreview {
@@ -964,11 +1173,66 @@ private struct AccessibilityIdentifierMarker: NSViewRepresentable {
     }
 }
 
+#if DEBUG
+private struct TestingActionMarker: NSViewRepresentable {
+    let identifier: String
+    let isEnabled: Bool
+    var isOn: Bool?
+    let action: () -> Void
+
+    init(
+        identifier: String,
+        isEnabled: Bool,
+        isOn: Bool? = nil,
+        action: @escaping () -> Void
+    ) {
+        self.identifier = identifier
+        self.isEnabled = isEnabled
+        self.isOn = isOn
+        self.action = action
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(action: action)
+    }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton()
+        button.isBordered = false
+        button.setAccessibilityElement(false)
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.performAction)
+        return button
+    }
+
+    func updateNSView(_ button: NSButton, context: Context) {
+        context.coordinator.action = action
+        button.setAccessibilityIdentifier(identifier)
+        button.isEnabled = isEnabled
+        button.state = isOn == true ? .on : .off
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+        }
+
+        @objc
+        func performAction() {
+            action()
+        }
+    }
+}
+#endif
+
 @MainActor
 final class LocationMapCameraEffects {
     private var appliedPreviewCoordinate: MapCoordinate?
     private var appliedRouteCameraIdentity: RouteRequestGeneration?
     private var appliedMacCenterGeneration: DeviceSessionGeneration?
+    private var appliedMacRecenterGeneration: MacRecenterGeneration?
     private var isApplyingProgrammaticCamera = false
 
     func applyPreview(
@@ -1004,6 +1268,17 @@ final class LocationMapCameraEffects {
         applyProgrammatic(update)
     }
 
+    func applyMacRecenter(
+        _ generation: MacRecenterGeneration,
+        update: () -> Void
+    ) {
+        guard generation != appliedMacRecenterGeneration else {
+            return
+        }
+        appliedMacRecenterGeneration = generation
+        applyProgrammatic(update)
+    }
+
     func regionWillChange(
         hasActiveGesture: Bool,
         onManualCameraInteraction: () -> Void
@@ -1032,6 +1307,7 @@ private struct ObservedSimulationMapCanvas: View {
     let routeCameraIdentity: RouteRequestGeneration?
     let macLocation: MapCoordinate?
     let macInitialCenterIntent: MacInitialCenterIntent?
+    let macRecenterIntent: MacRecenterIntent?
     let onCoordinateSelected: (MapCoordinate) -> Void
     let onManualCameraInteraction: () -> Void
 
@@ -1044,6 +1320,7 @@ private struct ObservedSimulationMapCanvas: View {
             routeCameraIdentity: routeCameraIdentity,
             macLocation: macLocation,
             macInitialCenterIntent: macInitialCenterIntent,
+            macRecenterIntent: macRecenterIntent,
             confirmedRouteMarkerCoordinate: mapCoordinate(
                 from: simulationStore.confirmedRouteMarkerCoordinate
             ),
@@ -1073,9 +1350,36 @@ struct LocationMapCanvas: NSViewRepresentable {
     let routeCameraIdentity: RouteRequestGeneration?
     let macLocation: MapCoordinate?
     let macInitialCenterIntent: MacInitialCenterIntent?
+    let macRecenterIntent: MacRecenterIntent?
     let confirmedRouteMarkerCoordinate: MapCoordinate?
     let onCoordinateSelected: (MapCoordinate) -> Void
     let onManualCameraInteraction: () -> Void
+
+    init(
+        preview: MapSearchPlace?,
+        endpointA: MapSearchPlace?,
+        endpointB: MapSearchPlace?,
+        route: [MapCoordinate]?,
+        routeCameraIdentity: RouteRequestGeneration?,
+        macLocation: MapCoordinate?,
+        macInitialCenterIntent: MacInitialCenterIntent?,
+        macRecenterIntent: MacRecenterIntent? = nil,
+        confirmedRouteMarkerCoordinate: MapCoordinate?,
+        onCoordinateSelected: @escaping (MapCoordinate) -> Void,
+        onManualCameraInteraction: @escaping () -> Void
+    ) {
+        self.preview = preview
+        self.endpointA = endpointA
+        self.endpointB = endpointB
+        self.route = route
+        self.routeCameraIdentity = routeCameraIdentity
+        self.macLocation = macLocation
+        self.macInitialCenterIntent = macInitialCenterIntent
+        self.macRecenterIntent = macRecenterIntent
+        self.confirmedRouteMarkerCoordinate = confirmedRouteMarkerCoordinate
+        self.onCoordinateSelected = onCoordinateSelected
+        self.onManualCameraInteraction = onManualCameraInteraction
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -1108,6 +1412,7 @@ struct LocationMapCanvas: NSViewRepresentable {
             routeCameraIdentity: routeCameraIdentity,
             macLocation: macLocation,
             macInitialCenterIntent: macInitialCenterIntent,
+            macRecenterIntent: macRecenterIntent,
             confirmedRouteMarkerCoordinate: confirmedRouteMarkerCoordinate
         )
     }
@@ -1164,6 +1469,7 @@ struct LocationMapCanvas: NSViewRepresentable {
             routeCameraIdentity: RouteRequestGeneration?,
             macLocation: MapCoordinate?,
             macInitialCenterIntent: MacInitialCenterIntent?,
+            macRecenterIntent: MacRecenterIntent? = nil,
             confirmedRouteMarkerCoordinate: MapCoordinate?
         ) {
             guard let mapView else {
@@ -1225,6 +1531,14 @@ struct LocationMapCanvas: NSViewRepresentable {
                     macInitialCenterIntent.generation
                 ) {
                     centerMap(on: macInitialCenterIntent.coordinate)
+                }
+            }
+
+            if let macRecenterIntent {
+                cameraEffects.applyMacRecenter(
+                    macRecenterIntent.generation
+                ) {
+                    centerMap(on: macRecenterIntent.coordinate)
                 }
             }
         }
