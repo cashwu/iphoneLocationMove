@@ -129,6 +129,47 @@ python3 -m unittest discover -s iPhoneLocationMoveHelper/tests
 
 這些自動化測試不需要實體 iPhone 或 root 權限。
 
+## 本機 Release 打包
+
+`Scripts/package-app.sh` 提供可從任意 current directory 執行的本機打包入口。
+執行前需要：
+
+- 已安裝 Xcode command line tools。
+- Xcode 已登入可使用 Team `2LRM76M575` 的 Apple Development 帳號。
+- PATH 中有 `python3`，可執行上述 Python protocol tests。
+
+從 repository root 執行預設流程：
+
+```sh
+Scripts/package-app.sh
+```
+
+腳本會依序清理 `build/`、執行 Xcode tests、執行 Python tests、建置 Release
+App、驗證 App 與 embedded helper 的簽章及雙向 `SMJobBless` requirements，最後
+建立 DMG。任一必要階段失敗時會停止且不宣告完成。
+
+可用選項：
+
+- `-h`／`--help`：顯示說明。
+- `-v VER`／`--version VER`：覆寫該次 App 的 `CFBundleShortVersionString`，
+  並建立版本化 DMG，例如 `--version 1.2.3`。
+- `--no-clean`：保留既有 `build/` 與 derived data。
+- `--skip-tests`：明確跳過 Xcode 與 Python tests。
+- `--no-dmg`：只產生並驗證 `.app`。
+
+產物位於：
+
+```text
+build/Export/iPhoneLocationMove.app
+build/iPhoneLocationMove.dmg
+build/iPhoneLocationMove-<version>.dmg
+```
+
+這些產物保留專案既有 Apple Development 簽署，只供已設定相同 Team 的本機開發
+與驗證。腳本不會改成 ad-hoc signing，也不會產生已公證或適合公開散布的版本。
+公開發佈前仍須完成 Developer ID、hardened runtime、公證、授權與 privileged
+helper security review。
+
 ## 故障排除
 
 ### 找不到 Python

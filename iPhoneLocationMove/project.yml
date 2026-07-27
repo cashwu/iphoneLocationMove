@@ -1,5 +1,6 @@
 name: iPhoneLocationMove
 options:
+  xcodeVersion: "14.3"
   deploymentTarget:
     macOS: "13.0"
   createIntermediateGroups: true
@@ -29,6 +30,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cash.iPhoneLocationMove
         PRODUCT_NAME: iPhoneLocationMove
+        MARKETING_VERSION: "1.0"
         GENERATE_INFOPLIST_FILE: false
         INFOPLIST_FILE: iPhoneLocationMove/Info.plist
         CODE_SIGN_ENTITLEMENTS: iPhoneLocationMove/iPhoneLocationMove.entitlements
@@ -64,6 +66,7 @@ targets:
           - Launchd.plist
           - Resources
           - Scripts
+          - Acceptance
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cash.iPhoneLocationMoveTunnelHelper
