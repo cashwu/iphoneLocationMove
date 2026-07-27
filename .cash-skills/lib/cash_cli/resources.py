@@ -83,8 +83,21 @@ APPLY_INSTRUCTION = (
 
 DISCIPLINES = {
     "tdd": (
-        "遵循 Red-Green-Refactor：先建立會因缺少目標行為而失敗的測試，"
-        "再以最小實作使測試通過，最後在綠燈狀態下整理程式碼。"
+        "TDD discipline 依下列 precedence 由前至後判定，每個 task 命中後不再落入後續分支。\n"
+        "1. bug fix 且存在實際可行的自動測試邊界：先以能辨識該缺陷的失敗測試重現；"
+        "修正後以最小實作使重現測試通過，並保留為 regression evidence。\n"
+        "2. 非 bug fix 的可觀察可執行行為變更，且存在實際可行的自動測試邊界："
+        "執行 Red-Green-Refactor；先建立因目標行為尚未存在而失敗的測試，"
+        "再以最小實作使測試通過，只在綠燈狀態進行 refactor。\n"
+        "3. 不改變可觀察行為的純 refactor：使用既有 regression tests；"
+        "證據不足時才補 characterization test，不要求 red phase。\n"
+        "4. 其餘 task，包括沒有實際可行自動測試邊界的 bug fix，"
+        "以及文件、metadata、checker-only task：執行命名的 verification target；"
+        "有可用自動 checker 時可以使用，不要求 red phase。\n"
+        "需要 red phase 時，測試必須因目標行為尚未存在而失敗；"
+        "不相關的較早 guard、pre-existing suite failure 或只有相同 exit code 不構成有效 red。"
+        "加入 diagnostic、state、artifact 或等價 assertion 以辨識目標路徑，"
+        "或改用更適合的驗證邊界。本 discipline 不要求特定程式語言或 test framework。"
     ),
     "audit": (
         "完成 API、設定或外部輸入邊界前，依 Scoundrel、Lazy Developer、"

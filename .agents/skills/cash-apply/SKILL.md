@@ -172,9 +172,9 @@ The trigger is guidance only — it MUST NOT block apply from proceeding when th
 
    Read `.cash.yaml` in the project root.
    If `tdd: true` is set, apply TDD discipline throughout implementation:
-   - For each task, write a failing test FIRST, then implement to make it pass
-   - Fetch TDD instructions by running `"$cash_cli" instructions --skill tdd`, then follow the Red-Green-Refactor cycle
-   - For bug fixes, reproduce the bug with a failing test before fixing
+   - Fetch TDD instructions by running `"$cash_cli" instructions --skill tdd`, then follow the returned `instruction`
+
+   If `tdd: false` is set, do not apply TDD ordering.
 
    If `audit: true` is set, apply sharp-edges discipline throughout implementation:
    - When designing APIs or interfaces, evaluate through 3 adversary lenses (Scoundrel, Lazy Developer, Confused Developer)
@@ -210,15 +210,13 @@ The trigger is guidance only — it MUST NOT block apply from proceeding when th
      2. **Quality** — derive values from existing state instead of duplicating; use existing types and constants over new literals
      3. **Efficiency** — parallelize independent async operations; avoid unnecessary awaits; match operation scope to actual need
      4. **No Placeholders in artifacts** — if the design or spec for this task contains placeholder language (TBD, TODO, "add appropriate handling"), pause and fix the artifact first or flag to the user. Do not implement against vague requirements.
-     5. **Examples as verification** — if the spec for this task's scope includes `##### Example:` blocks, use them as concrete test cases:
-        - When TDD is enabled: derive the first failing test directly from the example's GIVEN/WHEN/THEN values
-        - When TDD is not enabled: after implementing, verify the code handles the example's input→output correctly
-        - Example tables map to parameterized tests — one test per row
-          Do NOT invent additional test values beyond what the spec examples provide without reason. The examples ARE the agreed specification.
+     5. **Examples as verification** — if the spec for this task's scope includes `##### Example:` blocks, treat them as high-fidelity acceptance references:
+        - Cover every in-scope example's GIVEN/WHEN/THEN input and expected output, including every row of an example table, in the task's verification evidence.
+        - Add cases beyond the examples when there is a concrete risk or boundary reason.
+        - The examples are not a closed input set.
    - Make the code changes required
    - Keep changes minimal and focused
-   - Write or update the relevant test before marking the task done, even when TDD is disabled or the task is a small refactor
-   - **Verify before marking done** — re-read the task description from the tasks file AND the relevant Implementation Contract content from design.md. For each requirement stated in the task description and each contract item that covers this task's scope, confirm it is addressed by your changes. Confirm the verification target named by the task (test name, CLI invocation, analyzer check, or manual assertion) actually passes. If any contract item, task requirement, or verification target is missing or failing, implement/fix it now. Do not mark the task complete until every part of the description is covered and the contract for this task is satisfied.
+   - **Verify before marking done** — re-read the task description from the tasks file AND the relevant Implementation Contract content from design.md. For each requirement stated in the task description and each contract item that covers this task's scope, confirm it is addressed by your changes. Before calling `task done`, require verification evidence appropriate to the task: its named test, CLI, analyzer, or manual assertion must pass. If any contract item, task requirement, or verification target is missing or failing, implement/fix it now. Do not mark the task complete until every part of the description is covered and the contract for this task is satisfied.
    - Mark task complete by running: `"$cash_cli" task done --change "<name>" <task-id>`
      This command marks the checkbox in tasks.md AND records which files were modified for this task.
    - Continue to next task
