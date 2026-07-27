@@ -27,7 +27,21 @@ struct LocationMapView: View {
 
             Divider()
 
-            LocationMapCanvas(
+            mapCanvas
+        }
+        .onAppear(perform: synchronizeMacLocation)
+        .onChange(
+            of: macLocationCoordinator.coordinateGeneration
+        ) { _ in
+            synchronizeMacLocation()
+        }
+    }
+
+    @ViewBuilder
+    private var mapCanvas: some View {
+        if let simulationStore {
+            ObservedSimulationMapCanvas(
+                simulationStore: simulationStore,
                 preview: model.preview,
                 endpointA: model.endpointA,
                 endpointB: model.endpointB,
@@ -38,12 +52,19 @@ struct LocationMapView: View {
                 onCoordinateSelected: selectMapCoordinate,
                 onManualCameraInteraction: model.recordManualCameraInteraction
             )
-        }
-        .onAppear(perform: synchronizeMacLocation)
-        .onChange(
-            of: macLocationCoordinator.coordinateGeneration
-        ) { _ in
-            synchronizeMacLocation()
+        } else {
+            LocationMapCanvas(
+                preview: model.preview,
+                endpointA: model.endpointA,
+                endpointB: model.endpointB,
+                route: model.routePreview?.polyline,
+                routeCameraIdentity: model.routeCameraIdentity,
+                macLocation: model.macLocationCoordinate,
+                macInitialCenterIntent: model.macInitialCenterIntent,
+                confirmedRouteMarkerCoordinate: nil,
+                onCoordinateSelected: selectMapCoordinate,
+                onManualCameraInteraction: model.recordManualCameraInteraction
+            )
         }
     }
 
@@ -1002,7 +1023,8 @@ final class LocationMapCameraEffects {
     }
 }
 
-private struct LocationMapCanvas: NSViewRepresentable {
+private struct ObservedSimulationMapCanvas: View {
+    @ObservedObject var simulationStore: SimulationStore
     let preview: MapSearchPlace?
     let endpointA: MapSearchPlace?
     let endpointB: MapSearchPlace?
@@ -1010,6 +1032,48 @@ private struct LocationMapCanvas: NSViewRepresentable {
     let routeCameraIdentity: RouteRequestGeneration?
     let macLocation: MapCoordinate?
     let macInitialCenterIntent: MacInitialCenterIntent?
+    let onCoordinateSelected: (MapCoordinate) -> Void
+    let onManualCameraInteraction: () -> Void
+
+    var body: some View {
+        LocationMapCanvas(
+            preview: preview,
+            endpointA: endpointA,
+            endpointB: endpointB,
+            route: route,
+            routeCameraIdentity: routeCameraIdentity,
+            macLocation: macLocation,
+            macInitialCenterIntent: macInitialCenterIntent,
+            confirmedRouteMarkerCoordinate: mapCoordinate(
+                from: simulationStore.confirmedRouteMarkerCoordinate
+            ),
+            onCoordinateSelected: onCoordinateSelected,
+            onManualCameraInteraction: onManualCameraInteraction
+        )
+    }
+
+    private func mapCoordinate(
+        from coordinate: RouteCoordinate?
+    ) -> MapCoordinate? {
+        guard let coordinate else {
+            return nil
+        }
+        return try? MapCoordinate(
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude
+        )
+    }
+}
+
+struct LocationMapCanvas: NSViewRepresentable {
+    let preview: MapSearchPlace?
+    let endpointA: MapSearchPlace?
+    let endpointB: MapSearchPlace?
+    let route: [MapCoordinate]?
+    let routeCameraIdentity: RouteRequestGeneration?
+    let macLocation: MapCoordinate?
+    let macInitialCenterIntent: MacInitialCenterIntent?
+    let confirmedRouteMarkerCoordinate: MapCoordinate?
     let onCoordinateSelected: (MapCoordinate) -> Void
     let onManualCameraInteraction: () -> Void
 
@@ -1043,15 +1107,27 @@ private struct LocationMapCanvas: NSViewRepresentable {
             route: route,
             routeCameraIdentity: routeCameraIdentity,
             macLocation: macLocation,
-            macInitialCenterIntent: macInitialCenterIntent
+            macInitialCenterIntent: macInitialCenterIntent,
+            confirmedRouteMarkerCoordinate: confirmedRouteMarkerCoordinate
         )
     }
 
     final class Coordinator: NSObject, MKMapViewDelegate {
+        private enum AnnotationRole: Hashable {
+            case preview
+            case endpointA
+            case endpointB
+            case macLocation
+            case confirmedRouteMarker
+        }
+
         weak var mapView: MKMapView?
         var onCoordinateSelected: (MapCoordinate) -> Void
         var onManualCameraInteraction: () -> Void
         private let cameraEffects = LocationMapCameraEffects()
+        private var annotations: [AnnotationRole: MKPointAnnotation] = [:]
+        private var routeCoordinates: [MapCoordinate]?
+        private var routeOverlay: MKPolyline?
 
         init(
             onCoordinateSelected: @escaping (MapCoordinate) -> Void,
@@ -1087,35 +1163,47 @@ private struct LocationMapCanvas: NSViewRepresentable {
             route: [MapCoordinate]?,
             routeCameraIdentity: RouteRequestGeneration?,
             macLocation: MapCoordinate?,
-            macInitialCenterIntent: MacInitialCenterIntent?
+            macInitialCenterIntent: MacInitialCenterIntent?,
+            confirmedRouteMarkerCoordinate: MapCoordinate?
         ) {
             guard let mapView else {
                 return
             }
-            mapView.removeAnnotations(mapView.annotations)
-            mapView.removeOverlays(mapView.overlays)
+            syncAnnotation(
+                role: .preview,
+                coordinate: preview?.coordinate,
+                title: "預覽",
+                subtitle: preview?.address
+            )
+            syncAnnotation(
+                role: .endpointA,
+                coordinate: endpointA?.coordinate,
+                title: "A",
+                subtitle: endpointA?.address
+            )
+            syncAnnotation(
+                role: .endpointB,
+                coordinate: endpointB?.coordinate,
+                title: "B",
+                subtitle: endpointB?.address
+            )
+            syncAnnotation(
+                role: .macLocation,
+                coordinate: macLocation,
+                title: "Mac 目前位置"
+            )
+            syncAnnotation(
+                role: .confirmedRouteMarker,
+                coordinate: confirmedRouteMarkerCoordinate,
+                title: "iPhone 模擬位置"
+            )
+            syncRoute(route)
 
-            addAnnotation(preview, title: "預覽")
-            addAnnotation(endpointA, title: "A")
-            addAnnotation(endpointB, title: "B")
-            addAnnotation(macLocation, title: "Mac 目前位置")
-
-            if let route, route.count >= 2 {
-                var coordinates = route.map {
-                    CLLocationCoordinate2D(
-                        latitude: $0.latitude,
-                        longitude: $0.longitude
-                    )
-                }
-                let polyline = MKPolyline(
-                    coordinates: &coordinates,
-                    count: coordinates.count
-                )
-                mapView.addOverlay(polyline)
+            if let routeOverlay {
                 if let routeCameraIdentity {
                     cameraEffects.applyRoute(routeCameraIdentity) {
                         mapView.setVisibleMapRect(
-                            polyline.boundingMapRect,
+                            routeOverlay.boundingMapRect,
                             edgePadding: NSEdgeInsets(
                                 top: 40,
                                 left: 40,
@@ -1171,7 +1259,13 @@ private struct LocationMapCanvas: NSViewRepresentable {
             _ mapView: MKMapView,
             viewFor annotation: MKAnnotation
         ) -> MKAnnotationView? {
-            let identifier = "location-marker"
+            let role = annotations.first {
+                $0.value === annotation
+            }?.key
+            let isConfirmedRouteMarker = role == .confirmedRouteMarker
+            let identifier = isConfirmedRouteMarker
+                ? "iphone-route-marker"
+                : "location-marker"
             let view = mapView.dequeueReusableAnnotationView(
                 withIdentifier: identifier
             ) as? MKMarkerAnnotationView
@@ -1181,40 +1275,82 @@ private struct LocationMapCanvas: NSViewRepresentable {
                 )
             view.annotation = annotation
             view.canShowCallout = true
+            let avoidsCollision =
+                role == .endpointA
+                || role == .endpointB
+                || role == .confirmedRouteMarker
+            view.displayPriority = avoidsCollision ? .required : .defaultLow
+            view.collisionMode = avoidsCollision ? .none : .rectangle
+            if isConfirmedRouteMarker {
+                view.glyphImage = NSImage(
+                    systemSymbolName: "iphone",
+                    accessibilityDescription: "iPhone 模擬位置"
+                )
+                view.markerTintColor = .systemPurple
+                view.setAccessibilityIdentifier("iphone-route-marker")
+            }
             return view
         }
 
-        private func addAnnotation(
-            _ place: MapSearchPlace?,
-            title: String
+        private func syncAnnotation(
+            role: AnnotationRole,
+            coordinate: MapCoordinate?,
+            title: String,
+            subtitle: String? = nil
         ) {
-            guard let place, let mapView else {
+            guard let mapView else {
                 return
             }
-            let annotation = MKPointAnnotation()
-            annotation.coordinate = CLLocationCoordinate2D(
-                latitude: place.coordinate.latitude,
-                longitude: place.coordinate.longitude
-            )
-            annotation.title = title
-            annotation.subtitle = place.address
-            mapView.addAnnotation(annotation)
-        }
+            guard let coordinate else {
+                if let annotation = annotations.removeValue(forKey: role) {
+                    mapView.removeAnnotation(annotation)
+                }
+                return
+            }
 
-        private func addAnnotation(
-            _ coordinate: MapCoordinate?,
-            title: String
-        ) {
-            guard let coordinate, let mapView else {
-                return
-            }
-            let annotation = MKPointAnnotation()
+            let annotation = annotations[role] ?? MKPointAnnotation()
             annotation.coordinate = CLLocationCoordinate2D(
                 latitude: coordinate.latitude,
                 longitude: coordinate.longitude
             )
             annotation.title = title
-            mapView.addAnnotation(annotation)
+            annotation.subtitle = subtitle
+            if annotations[role] == nil {
+                annotations[role] = annotation
+                mapView.addAnnotation(annotation)
+            }
+        }
+
+        private func syncRoute(_ route: [MapCoordinate]?) {
+            guard let mapView else {
+                return
+            }
+            let validRoute = route.flatMap { $0.count >= 2 ? $0 : nil }
+            guard validRoute != routeCoordinates else {
+                return
+            }
+
+            if let routeOverlay {
+                mapView.removeOverlay(routeOverlay)
+            }
+            routeCoordinates = validRoute
+            routeOverlay = nil
+
+            guard let validRoute else {
+                return
+            }
+            var coordinates = validRoute.map {
+                CLLocationCoordinate2D(
+                    latitude: $0.latitude,
+                    longitude: $0.longitude
+                )
+            }
+            let polyline = MKPolyline(
+                coordinates: &coordinates,
+                count: coordinates.count
+            )
+            routeOverlay = polyline
+            mapView.addOverlay(polyline)
         }
 
         private func centerMap(on coordinate: MapCoordinate) {

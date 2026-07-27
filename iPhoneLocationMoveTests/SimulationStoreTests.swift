@@ -620,6 +620,151 @@ final class SimulationStoreTests: XCTestCase {
         XCTAssertEqual(paused.store.routeSnapshot?.confirmedDistance, 1.25)
     }
 
+    func testConfirmedRouteMarkerProjectionKeepsLastConfirmedCoordinateAcrossRoutePhases() async throws {
+        let running = try SimulationHarness()
+        try await running.store.startRoute(
+            preview: route(),
+            speedKilometersPerHour: 4.5,
+            roundTrip: false,
+            riskAccepted: true
+        )
+        let initialCoordinate = try XCTUnwrap(running.store.routeSnapshot?.confirmedCoordinate)
+        XCTAssertEqual(running.store.confirmedRouteMarkerCoordinate, initialCoordinate)
+
+        await running.device.enqueue(.suspended)
+        try running.store.tick(at: 4)
+        await running.device.waitForSetCount(2)
+        XCTAssertEqual(
+            running.store.confirmedRouteMarkerCoordinate,
+            initialCoordinate,
+            "A pending mutation must not move the marker ahead of confirmed device truth"
+        )
+        await running.device.completeNextSuspended()
+        await eventually { running.store.routeSnapshot?.confirmedDistance == 5 }
+        let advancedCoordinate = try XCTUnwrap(running.store.routeSnapshot?.confirmedCoordinate)
+
+        await running.device.enqueue(.suspendedDuringRecovery)
+        try running.store.tick(at: 8)
+        await running.device.waitForSetCount(3)
+        XCTAssertEqual(
+            running.store.confirmedRouteMarkerCoordinate,
+            advancedCoordinate,
+            "Transport recovery inside the pending device mutation must retain confirmed truth"
+        )
+        await running.device.completeNextSuspended()
+        await eventually { running.store.routeSnapshot?.confirmedDistance == 10 }
+        let recoveredCoordinate = try XCTUnwrap(running.store.routeSnapshot?.confirmedCoordinate)
+
+        try running.store.pause()
+        await eventually { running.store.routeSnapshot?.phase == .paused }
+        XCTAssertEqual(running.store.confirmedRouteMarkerCoordinate, recoveredCoordinate)
+
+        let completed = try SimulationHarness()
+        try await completed.store.startRoute(
+            preview: route(),
+            speedKilometersPerHour: 4.5,
+            roundTrip: false,
+            riskAccepted: true
+        )
+        try completed.store.tick(at: 720)
+        await completed.device.waitForSetCount(2)
+        await eventually { completed.store.routeSnapshot?.phase == .completed }
+        XCTAssertEqual(
+            completed.store.confirmedRouteMarkerCoordinate,
+            completed.store.routeSnapshot?.confirmedCoordinate
+        )
+    }
+
+    func testConfirmedRouteMarkerProjectionKeepsKnownPositionWhileStopping() async throws {
+        let harness = try SimulationHarness()
+        try await harness.store.startRoute(
+            preview: route(),
+            speedKilometersPerHour: 4.5,
+            roundTrip: false,
+            riskAccepted: true
+        )
+        try harness.store.tick(at: 4)
+        await harness.device.waitForSetCount(2)
+        await eventually { harness.store.routeSnapshot?.confirmedDistance == 5 }
+        let confirmedCoordinate = try XCTUnwrap(harness.store.routeSnapshot?.confirmedCoordinate)
+        await harness.device.enqueueClearSuspended()
+
+        let stop = Task { await harness.store.stop() }
+        await harness.device.waitForClearCount(1)
+        XCTAssertEqual(harness.store.confirmedRouteMarkerCoordinate, confirmedCoordinate)
+
+        await harness.device.failNextSuspendedClear(.clearFailed("busy"))
+        await stop.value
+        XCTAssertEqual(harness.store.confirmedRouteMarkerCoordinate, confirmedCoordinate)
+    }
+
+    func testConfirmedRouteMarkerProjectionStaysNilAfterUnknownPositionThroughStoppingFailure() async throws {
+        let harness = try SimulationHarness()
+        try await harness.store.startRoute(
+            preview: route(),
+            speedKilometersPerHour: 4.5,
+            roundTrip: false,
+            riskAccepted: true
+        )
+        XCTAssertNotNil(harness.store.routeSnapshot?.confirmedCoordinate)
+
+        harness.store.handleDeviceInterruption(
+            DeviceInterruption(
+                reason: .transportFailure,
+                positionKnowledge: .unknown
+            )
+        )
+        XCTAssertNil(harness.store.confirmedRouteMarkerCoordinate)
+        await harness.device.enqueueClearSuspended()
+
+        let stop = Task { await harness.store.stop() }
+        await harness.device.waitForClearCount(1)
+        XCTAssertNil(harness.store.confirmedRouteMarkerCoordinate)
+
+        await harness.device.failNextSuspendedClear(.clearFailed("busy"))
+        await stop.value
+        XCTAssertNil(harness.store.confirmedRouteMarkerCoordinate)
+    }
+
+    func testConfirmedRouteMarkerProjectionIsNilForReplacementPointAndIdle() async throws {
+        let harness = try SimulationHarness()
+        XCTAssertNil(harness.store.confirmedRouteMarkerCoordinate)
+        try await harness.store.startRoute(
+            preview: route(),
+            speedKilometersPerHour: 4.5,
+            roundTrip: false,
+            riskAccepted: true
+        )
+        await harness.device.enqueue(.suspended)
+        try harness.store.tick(at: 1)
+        await harness.device.waitForSetCount(2)
+
+        let replacement = Task {
+            await harness.store.confirmPoint(
+                try! DeviceCoordinate(latitude: 24, longitude: 120),
+                riskAccepted: true
+            )
+        }
+        await eventually {
+            if case .replacing = harness.store.state {
+                return true
+            }
+            return false
+        }
+        XCTAssertNil(harness.store.confirmedRouteMarkerCoordinate)
+
+        await harness.device.completeNextSuspended()
+        await replacement.value
+        guard case .pointActive = harness.store.state else {
+            return XCTFail("Expected point replacement")
+        }
+        XCTAssertNil(harness.store.confirmedRouteMarkerCoordinate)
+
+        await harness.store.stop()
+        XCTAssertEqual(harness.store.state, .idle)
+        XCTAssertNil(harness.store.confirmedRouteMarkerCoordinate)
+    }
+
     private func route() -> RoutePreview {
         try! RoutePreview(points: [
             RoutePoint(
@@ -684,6 +829,7 @@ private actor FakeSimulationDevice: DeviceLocationClient {
         case success
         case failure(DeviceLocationError)
         case suspended
+        case suspendedDuringRecovery
     }
 
     struct SetCall: Equatable, Sendable {
@@ -697,6 +843,8 @@ private actor FakeSimulationDevice: DeviceLocationClient {
 
     private var behaviors: [Behavior] = []
     private var pending: [Pending] = []
+    private var suspendNextClear = false
+    private var pendingClear: Pending?
     private(set) var setCalls: [SetCall] = []
     private(set) var clearCallCount = 0
     private var clearFailures: [DeviceLocationError] = []
@@ -711,8 +859,18 @@ private actor FakeSimulationDevice: DeviceLocationClient {
         clearFailures.append(error)
     }
 
+    func enqueueClearSuspended() {
+        suspendNextClear = true
+    }
+
     func waitForSetCount(_ count: Int) async {
         while setCalls.count < count {
+            await Task.yield()
+        }
+    }
+
+    func waitForClearCount(_ count: Int) async {
+        while clearCallCount < count {
             await Task.yield()
         }
     }
@@ -739,6 +897,11 @@ private actor FakeSimulationDevice: DeviceLocationClient {
 
     func failNextSuspended(_ error: DeviceLocationError) {
         pending.removeFirst().continuation.resume(throwing: error)
+    }
+
+    func failNextSuspendedClear(_ error: DeviceLocationError) {
+        pendingClear?.continuation.resume(throwing: error)
+        pendingClear = nil
     }
 
     func completeAllSuspended() {
@@ -770,7 +933,7 @@ private actor FakeSimulationDevice: DeviceLocationClient {
             return
         case let .failure(error):
             throw error
-        case .suspended:
+        case .suspended, .suspendedDuringRecovery:
             try await withCheckedThrowingContinuation { continuation in
                 pending.append(Pending(continuation: continuation))
             }
@@ -779,6 +942,13 @@ private actor FakeSimulationDevice: DeviceLocationClient {
 
     func clearLocation(context: DeviceCleanupContext) async throws {
         clearCallCount += 1
+        if suspendNextClear {
+            suspendNextClear = false
+            try await withCheckedThrowingContinuation { continuation in
+                pendingClear = Pending(continuation: continuation)
+            }
+            return
+        }
         if !clearFailures.isEmpty {
             throw clearFailures.removeFirst()
         }

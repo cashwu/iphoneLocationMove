@@ -86,6 +86,23 @@ final class SimulationStore: ObservableObject {
         return snapshot
     }
 
+    var confirmedRouteMarkerCoordinate: RouteCoordinate? {
+        switch state {
+        case .route(let snapshot, _):
+            guard snapshot.interruption?.positionKnowledge != .unknown else {
+                return nil
+            }
+            return snapshot.confirmedCoordinate
+        case .stopping:
+            guard routeSession?.interruption?.positionKnowledge != .unknown else {
+                return nil
+            }
+            return routeSession?.confirmedCoordinate
+        default:
+            return nil
+        }
+    }
+
     func confirmPoint(
         _ coordinate: DeviceCoordinate,
         riskAccepted: Bool

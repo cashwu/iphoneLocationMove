@@ -1,3 +1,4 @@
+import MapKit
 import XCTest
 @testable import iPhoneLocationMove
 
@@ -474,6 +475,329 @@ final class LocationMapModelTests: XCTestCase {
         XCTAssertEqual(manualInteractionCount, 1)
     }
 
+    func testConfirmedIPhoneMarkerUpdatesInPlaceWithoutReplacingMapContent() throws {
+        let mapView = CameraOperationSpyMapView()
+        var manualInteractionCount = 0
+        let coordinator = LocationMapCanvas.Coordinator(
+            onCoordinateSelected: { _ in },
+            onManualCameraInteraction: {
+                manualInteractionCount += 1
+            }
+        )
+        coordinator.mapView = mapView
+
+        let preview = searchPlace(
+            latitude: 25.032,
+            longitude: 121.562,
+            address: "預覽地址"
+        )
+        let endpointA = searchPlace(
+            latitude: 25.03,
+            longitude: 121.56,
+            address: "起點"
+        )
+        let endpointB = searchPlace(
+            latitude: 25.04,
+            longitude: 121.57,
+            address: "終點"
+        )
+        let macLocation = coordinate(latitude: 25.05, longitude: 121.55)
+        let route = polyline()
+        let routeIdentity = RouteRequestGeneration(rawValue: 1)
+        let firstIPhoneLocation = coordinate(
+            latitude: 25.033,
+            longitude: 121.563
+        )
+        let secondIPhoneLocation = coordinate(
+            latitude: 25.036,
+            longitude: 121.566
+        )
+
+        coordinator.update(
+            preview: preview,
+            endpointA: endpointA,
+            endpointB: endpointB,
+            route: route,
+            routeCameraIdentity: routeIdentity,
+            macLocation: macLocation,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: firstIPhoneLocation
+        )
+
+        let previewAnnotation = try annotation(titled: "預覽", in: mapView)
+        let endpointAAnnotation = try annotation(titled: "A", in: mapView)
+        let endpointBAnnotation = try annotation(titled: "B", in: mapView)
+        let macAnnotation = try annotation(titled: "Mac 目前位置", in: mapView)
+        let iPhoneAnnotation = try annotation(
+            titled: "iPhone 模擬位置",
+            in: mapView
+        )
+        let routeOverlay = try XCTUnwrap(mapView.overlays.first)
+        let cameraCountsAfterInitialRender = mapView.cameraOperationCounts
+
+        coordinator.update(
+            preview: preview,
+            endpointA: endpointA,
+            endpointB: endpointB,
+            route: route,
+            routeCameraIdentity: routeIdentity,
+            macLocation: macLocation,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: secondIPhoneLocation
+        )
+
+        XCTAssertIdentical(
+            try annotation(titled: "預覽", in: mapView),
+            previewAnnotation
+        )
+        XCTAssertIdentical(
+            try annotation(titled: "A", in: mapView),
+            endpointAAnnotation
+        )
+        XCTAssertIdentical(
+            try annotation(titled: "B", in: mapView),
+            endpointBAnnotation
+        )
+        XCTAssertIdentical(
+            try annotation(titled: "Mac 目前位置", in: mapView),
+            macAnnotation
+        )
+        XCTAssertIdentical(
+            try annotation(titled: "iPhone 模擬位置", in: mapView),
+            iPhoneAnnotation
+        )
+        XCTAssertEqual(
+            iPhoneAnnotation.coordinate.latitude,
+            secondIPhoneLocation.latitude,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            iPhoneAnnotation.coordinate.longitude,
+            secondIPhoneLocation.longitude,
+            accuracy: 0.000_001
+        )
+        XCTAssertIdentical(try XCTUnwrap(mapView.overlays.first), routeOverlay)
+        XCTAssertEqual(mapView.cameraOperationCounts, cameraCountsAfterInitialRender)
+        XCTAssertEqual(manualInteractionCount, 0)
+
+        coordinator.update(
+            preview: preview,
+            endpointA: endpointA,
+            endpointB: endpointB,
+            route: route,
+            routeCameraIdentity: routeIdentity,
+            macLocation: macLocation,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: nil
+        )
+
+        XCTAssertNil(mapView.annotations.first { $0.title == "iPhone 模擬位置" })
+        XCTAssertIdentical(
+            try annotation(titled: "預覽", in: mapView),
+            previewAnnotation
+        )
+        XCTAssertIdentical(
+            try annotation(titled: "A", in: mapView),
+            endpointAAnnotation
+        )
+        XCTAssertIdentical(
+            try annotation(titled: "B", in: mapView),
+            endpointBAnnotation
+        )
+        XCTAssertIdentical(
+            try annotation(titled: "Mac 目前位置", in: mapView),
+            macAnnotation
+        )
+        XCTAssertIdentical(try XCTUnwrap(mapView.overlays.first), routeOverlay)
+        XCTAssertEqual(mapView.cameraOperationCounts, cameraCountsAfterInitialRender)
+        XCTAssertEqual(manualInteractionCount, 0)
+    }
+
+    func testConfirmedIPhoneMarkerUpdatesDoNotReplayPreviewCameraOperation() {
+        let mapView = CameraOperationSpyMapView()
+        var manualInteractionCount = 0
+        let coordinator = LocationMapCanvas.Coordinator(
+            onCoordinateSelected: { _ in },
+            onManualCameraInteraction: {
+                manualInteractionCount += 1
+            }
+        )
+        coordinator.mapView = mapView
+        let preview = searchPlace(
+            latitude: 25.032,
+            longitude: 121.562,
+            address: "預覽地址"
+        )
+
+        coordinator.update(
+            preview: preview,
+            endpointA: nil,
+            endpointB: nil,
+            route: nil,
+            routeCameraIdentity: nil,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: coordinate(
+                latitude: 25.033,
+                longitude: 121.563
+            )
+        )
+        let cameraCountsAfterInitialRender = mapView.cameraOperationCounts
+
+        for offset in 1 ... 3 {
+            coordinator.update(
+                preview: preview,
+                endpointA: nil,
+                endpointB: nil,
+                route: nil,
+                routeCameraIdentity: nil,
+                macLocation: nil,
+                macInitialCenterIntent: nil,
+                confirmedRouteMarkerCoordinate: coordinate(
+                    latitude: 25.033 + Double(offset) / 1_000,
+                    longitude: 121.563 + Double(offset) / 1_000
+                )
+            )
+        }
+
+        XCTAssertEqual(mapView.cameraOperationCounts, cameraCountsAfterInitialRender)
+        XCTAssertEqual(manualInteractionCount, 0)
+    }
+
+    func testConfirmedIPhoneMarkerUpdatesDoNotReplayMacCameraOperation() {
+        let mapView = CameraOperationSpyMapView()
+        var manualInteractionCount = 0
+        let coordinator = LocationMapCanvas.Coordinator(
+            onCoordinateSelected: { _ in },
+            onManualCameraInteraction: {
+                manualInteractionCount += 1
+            }
+        )
+        coordinator.mapView = mapView
+        let macLocation = coordinate(latitude: 25.05, longitude: 121.55)
+        let macCenterIntent = MacInitialCenterIntent(
+            coordinate: macLocation,
+            generation: DeviceSessionGeneration(rawValue: 1)
+        )
+
+        coordinator.update(
+            preview: nil,
+            endpointA: nil,
+            endpointB: nil,
+            route: nil,
+            routeCameraIdentity: nil,
+            macLocation: macLocation,
+            macInitialCenterIntent: macCenterIntent,
+            confirmedRouteMarkerCoordinate: coordinate(
+                latitude: 25.033,
+                longitude: 121.563
+            )
+        )
+        let cameraCountsAfterInitialRender = mapView.cameraOperationCounts
+
+        for offset in 1 ... 3 {
+            coordinator.update(
+                preview: nil,
+                endpointA: nil,
+                endpointB: nil,
+                route: nil,
+                routeCameraIdentity: nil,
+                macLocation: macLocation,
+                macInitialCenterIntent: macCenterIntent,
+                confirmedRouteMarkerCoordinate: coordinate(
+                    latitude: 25.033 + Double(offset) / 1_000,
+                    longitude: 121.563 + Double(offset) / 1_000
+                )
+            )
+        }
+
+        XCTAssertEqual(mapView.cameraOperationCounts, cameraCountsAfterInitialRender)
+        XCTAssertEqual(manualInteractionCount, 0)
+    }
+
+    func testNewAnnotationsAreConfiguredBeforeBeingAddedToMap() throws {
+        let mapView = CameraOperationSpyMapView()
+        let coordinator = LocationMapCanvas.Coordinator(
+            onCoordinateSelected: { _ in },
+            onManualCameraInteraction: {}
+        )
+        coordinator.mapView = mapView
+        let endpointA = searchPlace(
+            latitude: 25.03,
+            longitude: 121.56,
+            address: "起點"
+        )
+
+        coordinator.update(
+            preview: nil,
+            endpointA: endpointA,
+            endpointB: nil,
+            route: nil,
+            routeCameraIdentity: nil,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: nil
+        )
+
+        let stateAtInsertion = try XCTUnwrap(
+            mapView.addedAnnotationStates.first { $0.title == "A" }
+        )
+        XCTAssertEqual(stateAtInsertion.latitude, 25.03, accuracy: 0.000_001)
+        XCTAssertEqual(stateAtInsertion.longitude, 121.56, accuracy: 0.000_001)
+    }
+
+    func testEndpointAndIPhoneMarkersAreNotSuppressedByCollisionLayout() throws {
+        let mapView = CameraOperationSpyMapView()
+        let coordinator = LocationMapCanvas.Coordinator(
+            onCoordinateSelected: { _ in },
+            onManualCameraInteraction: {}
+        )
+        coordinator.mapView = mapView
+        let sharedCoordinate = coordinate(latitude: 25.03, longitude: 121.56)
+
+        coordinator.update(
+            preview: nil,
+            endpointA: MapSearchPlace(
+                coordinate: sharedCoordinate,
+                address: "起點"
+            ),
+            endpointB: nil,
+            route: nil,
+            routeCameraIdentity: nil,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: sharedCoordinate
+        )
+
+        let endpointAnnotation = try annotation(titled: "A", in: mapView)
+        let iPhoneAnnotation = try annotation(
+            titled: "iPhone 模擬位置",
+            in: mapView
+        )
+        let endpointView = try XCTUnwrap(
+            coordinator.mapView(mapView, viewFor: endpointAnnotation)
+        )
+        let iPhoneView = try XCTUnwrap(
+            coordinator.mapView(mapView, viewFor: iPhoneAnnotation)
+        )
+
+        XCTAssertEqual(endpointView.displayPriority, .required)
+        XCTAssertEqual(endpointView.collisionMode, .none)
+        XCTAssertEqual(iPhoneView.displayPriority, .required)
+        XCTAssertEqual(iPhoneView.collisionMode, .none)
+    }
+
+    private func annotation(
+        titled title: String,
+        in mapView: MKMapView
+    ) throws -> MKAnnotation {
+        try XCTUnwrap(
+            mapView.annotations.first {
+                $0.title == title
+            }
+        )
+    }
+
     private func modelWithEndpoints() throws -> LocationMapModel {
         let model = LocationMapModel()
         try model.selectMapCoordinate(
@@ -511,5 +835,54 @@ final class LocationMapModelTests: XCTestCase {
         longitude: Double
     ) -> MapCoordinate {
         try! MapCoordinate(latitude: latitude, longitude: longitude)
+    }
+}
+
+@MainActor
+private final class CameraOperationSpyMapView: MKMapView {
+    struct AddedAnnotationState {
+        let title: String?
+        let latitude: CLLocationDegrees
+        let longitude: CLLocationDegrees
+    }
+
+    struct Counts: Equatable {
+        var routeFit = 0
+        var center = 0
+    }
+
+    private(set) var cameraOperationCounts = Counts()
+    private(set) var addedAnnotationStates: [AddedAnnotationState] = []
+
+    override func addAnnotation(_ annotation: MKAnnotation) {
+        addedAnnotationStates.append(
+            AddedAnnotationState(
+                title: annotation.title ?? nil,
+                latitude: annotation.coordinate.latitude,
+                longitude: annotation.coordinate.longitude
+            )
+        )
+        super.addAnnotation(annotation)
+    }
+
+    override func setVisibleMapRect(
+        _ mapRect: MKMapRect,
+        edgePadding insets: NSEdgeInsets,
+        animated animate: Bool
+    ) {
+        cameraOperationCounts.routeFit += 1
+        super.setVisibleMapRect(
+            mapRect,
+            edgePadding: insets,
+            animated: animate
+        )
+    }
+
+    override func setRegion(
+        _ region: MKCoordinateRegion,
+        animated animate: Bool
+    ) {
+        cameraOperationCounts.center += 1
+        super.setRegion(region, animated: animate)
     }
 }
