@@ -21,6 +21,7 @@ from typing import Iterable
 from .config import ConfigError, parse_cash_config, parse_openspec_config
 
 
+BUNDLE_VERSION = "2.11.0"
 VERSION_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 MODE_RE = re.compile(r"0[0-7]{3}\Z")
@@ -37,6 +38,32 @@ SKILLS = (
     "ingest",
     "propose",
     "verify",
+)
+# The expected runtime inventory for a target, where no source tree exists to
+# derive it from. Ordered by path bytes, matching `source_inventory`'s sort key.
+# `test_installer_runtime.py` asserts this equals what `source_inventory`
+# derives, so a runtime module added or removed without updating this tuple
+# turns the source-side suite red instead of reaching a target.
+BUNDLE_RUNTIME_PATHS = (
+    ".cash-skills/lib/cash_cli/__init__.py",
+    ".cash-skills/lib/cash_cli/commands/__init__.py",
+    ".cash-skills/lib/cash_cli/commands/analyze.py",
+    ".cash-skills/lib/cash_cli/commands/archive.py",
+    ".cash-skills/lib/cash_cli/commands/create.py",
+    ".cash-skills/lib/cash_cli/commands/discovery.py",
+    ".cash-skills/lib/cash_cli/commands/drift.py",
+    ".cash-skills/lib/cash_cli/commands/lifecycle.py",
+    ".cash-skills/lib/cash_cli/commands/search.py",
+    ".cash-skills/lib/cash_cli/commands/tasks.py",
+    ".cash-skills/lib/cash_cli/commands/validate.py",
+    ".cash-skills/lib/cash_cli/config.py",
+    ".cash-skills/lib/cash_cli/errors.py",
+    ".cash-skills/lib/cash_cli/installer.py",
+    ".cash-skills/lib/cash_cli/main.py",
+    ".cash-skills/lib/cash_cli/resources.py",
+    ".cash-skills/lib/cash_cli/spec_merge.py",
+    ".cash-skills/lib/cash_cli/validation.py",
+    ".cash-skills/lib/cash_cli/workspace.py",
 )
 STABLE_PATHS = (".cash-skills/bin/cash", ".cash-workspace.lock")
 GUIDANCE_PATHS = ("AGENTS.md", "CLAUDE.md")
@@ -63,6 +90,14 @@ class InstallerError(Exception):
         super().__init__(message)
         self.result = result
         self.exit_code = exit_code
+
+
+class InitError(Exception):
+    """A target-side receipt initialization failure with a named error code."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -1710,6 +1745,293 @@ def bootstrap_source(source: Path, *, dry_run: bool) -> str:
             os.close(lock_descriptor)
 
 
+def managed_skill_paths() -> tuple[str, ...]:
+    return tuple(
+        f"{variant}/skills/cash-{skill}/SKILL.md"
+        for variant in (".agents", ".claude")
+        for skill in SKILLS
+    )
+
+
+def init_source_layout(root: Path) -> bool:
+    """Detect the canonical source repository from the launcher's marker set.
+
+    The launcher also requires the root to be the Git worktree top-level; the
+    caller has already established that, so only the file shapes and the
+    bundle version file remain.
+
+    Unlike the launcher this predicate does not gate on contract modes. A
+    source repository cloned under umask `002` carries `0664`/`0775` markers,
+    and none of them belong to the managed inventory that mode normalisation
+    repairs, so a mode-equal predicate would silently classify that clone as
+    an ordinary target and sign a receipt for it.
+    """
+    required: list[str] = [
+        "install-cash-skills.fish",
+        "cash-skills.version",
+        ".cash.yaml",
+        OPENSPEC_CONFIG_PATH,
+        "CASH-SKILLS.md",
+        LEGACY_MANIFEST_PATH,
+        ".cash-skills/lib/cash_cli/__init__.py",
+        ".cash-skills/lib/cash_cli/installer.py",
+        ".cash-skills/lib/cash_cli/main.py",
+        ".cash-skills/lib/cash_cli/workspace.py",
+        *managed_skill_paths(),
+    ]
+    try:
+        for relative in required:
+            metadata = os.lstat(root / relative)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                return False
+        content, _ = read_regular(root, "cash-skills.version")
+        text = content.decode("ascii")
+        if not text.endswith("\n") or text.count("\n") != 1:
+            return False
+        version_parts(text[:-1])
+    except (OSError, UnicodeError, InstallerError):
+        return False
+    return True
+
+
+def init_validate_config(root: Path) -> None:
+    try:
+        ensure_regular_shape(root, OPENSPEC_CONFIG_PATH)
+        content, _ = read_regular(root, OPENSPEC_CONFIG_PATH)
+        parse_openspec_config(content.decode("utf-8"), path=OPENSPEC_CONFIG_PATH)
+    except (InstallerError, UnicodeDecodeError, ConfigError) as error:
+        raise InitError(
+            "init_config_invalid",
+            f"invalid {OPENSPEC_CONFIG_PATH}: {error}",
+        ) from error
+
+
+def init_managed_shape(root: Path, relative: str) -> Path:
+    try:
+        path = ensure_contained(root, relative)
+    except InstallerError as error:
+        raise InitError("init_inventory_invalid", str(error)) from error
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError as error:
+        raise InitError(
+            "init_inventory_invalid",
+            f"managed path is missing: {relative}",
+        ) from error
+    except OSError as error:
+        raise InitError(
+            "init_inventory_invalid",
+            f"cannot inspect managed path {relative}: {error}",
+        ) from error
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise InitError(
+            "init_inventory_invalid",
+            f"unsafe managed file identity: {relative}",
+        )
+    return path
+
+
+def init_acquire_lock(root: Path) -> int:
+    """Take the stable workspace lock without creating it and without a mode gate.
+
+    The contract mode is applied by mode normalisation after the lock is held,
+    so gating the lock on `0644` here would reject exactly the umask-skewed
+    clone this mode exists to repair. Emptiness is still gated, because a
+    non-empty lock leaves the CLI failing with `workspace_lock_invalid` after
+    an otherwise successful initialization, and repairing a stable file is a
+    declared Non-Goal.
+    """
+    path = init_managed_shape(root, STABLE_PATHS[1])
+    try:
+        descriptor = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as error:
+        raise InitError(
+            "init_inventory_invalid",
+            f"cannot open stable workspace lock: {error}",
+        ) from error
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        opened = os.fstat(descriptor)
+        named = os.lstat(path)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or opened.st_size != 0
+            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+        ):
+            raise InitError(
+                "init_inventory_invalid",
+                f"stable workspace lock must be an empty regular file: {STABLE_PATHS[1]}",
+            )
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def init_inventory(root: Path) -> tuple[tuple[str, str, int], ...]:
+    """(kind, path, contract mode) for every managed path, in receipt order."""
+    library = root / ".cash-skills" / "lib" / "cash_cli"
+    if library.is_symlink() or not library.is_dir():
+        raise InitError(
+            "init_inventory_invalid",
+            "managed path is missing: .cash-skills/lib/cash_cli",
+        )
+    # The exclusion is judged on the path relative to the target root, so a
+    # project that happens to live under an ancestor directory named
+    # `__pycache__` does not report its whole runtime as missing.
+    present = set()
+    for path in library.rglob("*.py"):
+        relative = path.relative_to(root)
+        if "__pycache__" not in relative.parts:
+            present.add(relative.as_posix())
+    expected = set(BUNDLE_RUNTIME_PATHS)
+    if present != expected:
+        missing = sorted(expected - present)
+        extra = sorted(present - expected)
+        raise InitError(
+            "init_inventory_invalid",
+            "runtime inventory does not match the canonical set: "
+            f"missing={missing} extra={extra}",
+        )
+    entries: list[tuple[str, str, int]] = [
+        ("stable", STABLE_PATHS[0], 0o755),
+        ("stable", STABLE_PATHS[1], 0o644),
+    ]
+    entries.extend(("runtime", relative, 0o644) for relative in BUNDLE_RUNTIME_PATHS)
+    entries.extend(("skill", relative, 0o644) for relative in managed_skill_paths())
+    return tuple(entries)
+
+
+def init_normalize_modes(root: Path, inventory: tuple[tuple[str, str, int], ...]) -> None:
+    """Absorb the umask a clone applied, after validating every managed shape.
+
+    Shape validation is a separate pass so an unsafe entry cannot leave an
+    earlier entry already chmod-ed. A `chmod` that itself fails part way
+    through can still leave the inventory partly normalised; only file content
+    is guaranteed untouched on every failure path.
+    """
+    pending: list[tuple[Path, str, int]] = []
+    for _, relative, mode in inventory:
+        path = init_managed_shape(root, relative)
+        if stat.S_IMODE(os.lstat(path).st_mode) != mode:
+            pending.append((path, relative, mode))
+    for path, relative, mode in pending:
+        try:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError as error:
+            raise InitError(
+                "init_inventory_invalid",
+                f"cannot open managed path {relative}: {error}",
+            ) from error
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                raise InitError(
+                    "init_inventory_invalid",
+                    f"unsafe managed file identity: {relative}",
+                )
+            os.fchmod(descriptor, mode)
+        except OSError as error:
+            raise InitError(
+                "init_inventory_invalid",
+                f"cannot normalise mode for {relative}: {error}",
+            ) from error
+        finally:
+            os.close(descriptor)
+
+
+def init_records(
+    root: Path,
+    inventory: tuple[tuple[str, str, int], ...],
+) -> tuple[Record, ...]:
+    records: list[Record] = []
+    for kind, relative, mode in inventory:
+        try:
+            content, _ = read_regular(root, relative, expected_mode=mode)
+        except InstallerError as error:
+            raise InitError("init_inventory_invalid", str(error)) from error
+        records.append(Record(kind, relative, sha256(content), mode))
+    return tuple(records)
+
+
+def init_publish_receipt(root: Path, records: tuple[Record, ...]) -> str:
+    runtime_stream = "".join(
+        f"{record.path}\t{record.digest}\t{record.mode:04o}\n"
+        for record in records
+        if record.kind == "runtime"
+    ).encode("utf-8")
+    try:
+        expected = receipt_bytes(BUNDLE_VERSION, sha256(runtime_stream), records, root)
+        # The shape is decided from lstat before any open: opening a FIFO for
+        # reading blocks until a writer appears, and the exclusive workspace
+        # lock is already held, so a blocking open would wedge every command.
+        ensure_regular_shape(root, RECEIPT_PATH)
+        snapshot = optional_snapshot(root, RECEIPT_PATH)
+    except (InstallerError, OSError) as error:
+        raise InitError("init_write_failed", str(error)) from error
+    # A byte-equal receipt whose mode drifted still fails the launcher's
+    # `0644` gate, so equivalence includes the contract mode and the drifted
+    # mode is repaired by a normal re-issue rather than reported as current.
+    if snapshot.exists and snapshot.content == expected and snapshot.mode == 0o644:
+        return "current"
+    if snapshot.exists:
+        try:
+            parse_receipt(snapshot.content or b"", records)
+        except InstallerError as error:
+            print(f"{root}: replacing an invalid {RECEIPT_PATH}: {error}", file=sys.stderr)
+    try:
+        directory = ensure_contained(root, ".cash-skills")
+        metadata = os.lstat(directory)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise InstallerError("unsafe managed directory: .cash-skills")
+        atomic_write(root, RECEIPT_PATH, expected, 0o644, expected=snapshot)
+    except (InstallerError, OSError) as error:
+        raise InitError("init_write_failed", str(error)) from error
+    return "initialized"
+
+
+def init_receipt() -> str:
+    if sys.version_info < (3, 11):
+        raise InitError(
+            "init_python_version",
+            "Cash receipt initialization requires Python 3.11+",
+        )
+    root = Path.cwd().resolve()
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        top_level = Path(result.stdout.strip()).resolve()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise InitError(
+            "init_outside_worktree",
+            "--init-receipt must run from the Git worktree top-level",
+        ) from error
+    if top_level != root:
+        raise InitError(
+            "init_outside_worktree",
+            f"--init-receipt must run from the Git worktree top-level: {top_level}",
+        )
+    if init_source_layout(root):
+        raise InitError(
+            "init_source_repo",
+            "this is the canonical Cash source repository; run "
+            "./install-cash-skills.fish --self from the project root",
+        )
+    init_validate_config(root)
+    descriptor = init_acquire_lock(root)
+    try:
+        inventory = init_inventory(root)
+        init_normalize_modes(root, inventory)
+        return init_publish_receipt(root, init_records(root, inventory))
+    finally:
+        os.close(descriptor)
+
+
 def safe_home() -> Path:
     value = os.environ.get("HOME", "")
     path = Path(value)
@@ -1811,6 +2133,7 @@ def parser() -> argparse.ArgumentParser:
     modes.add_argument("--unregister", metavar="<project>")
     modes.add_argument("--list", action="store_true")
     modes.add_argument("--all", action="store_true")
+    modes.add_argument("--init-receipt", action="store_true")
     result.add_argument("--dry-run", action="store_true")
     result.add_argument("--force", action="store_true")
     return result
@@ -1834,6 +2157,21 @@ def run(arguments: list[str] | None = None) -> int:
         )
     if options.force and not (options.target is not None or options.all):
         raise InstallerError("--force requires --target or --all", exit_code=2)
+    if options.init_receipt:
+        try:
+            result = init_receipt()
+        except InitError as error:
+            sys.stdout.write(
+                json.dumps(
+                    {"error": {"code": error.code, "message": str(error)}},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            return 1
+        print(result)
+        return 0
     if options.self:
         result = bootstrap_source(source, dry_run=options.dry_run)
         print(f"Result: {result}")
