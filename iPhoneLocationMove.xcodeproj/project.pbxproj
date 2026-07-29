@@ -18,6 +18,7 @@
 		2E811F185371ABA4502333D8 /* SystemSleepObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = C33C39B75F30F97C5FD87F97 /* SystemSleepObserver.swift */; };
 		32057B506FAED21F44D7666F /* LocationMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE6718254E74C698E2F36E02 /* LocationMapView.swift */; };
 		35A8358607153D109DA461C7 /* RouteSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11C88E4D0E82125D49725F3 /* RouteSessionTests.swift */; };
+		37810BB8290817FD3574CE15 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3062233C69A9B652FDBECEAA /* Assets.xcassets */; };
 		4C99660E7896E0D08F3BE432 /* RuntimeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EE0A623E7C45A8C947ABAE8 /* RuntimeManager.swift */; };
 		4E1F90F4B7D0984FC285143F /* TunnelHelperContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 400EE4D384C988AEFE71B639 /* TunnelHelperContractTests.swift */; };
 		53CFAD6ACEDE2EE082F83BE1 /* AppLifecycleCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 900C1DF2377C49650214DA8B /* AppLifecycleCoordinator.swift */; };
@@ -92,6 +93,7 @@
 		274A64B3475B34DF78AFE12A /* DeviceRecoveryCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceRecoveryCoordinator.swift; sourceTree = "<group>"; };
 		2969BAD05EABCF241CA945CC /* MacLocationClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacLocationClientTests.swift; sourceTree = "<group>"; };
 		2CD79CFBC78C06B97BB75FA7 /* DeviceSetupStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceSetupStore.swift; sourceTree = "<group>"; };
+		3062233C69A9B652FDBECEAA /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		400EE4D384C988AEFE71B639 /* TunnelHelperContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelHelperContractTests.swift; sourceTree = "<group>"; };
 		4B12E4A8F3296E1234B086F0 /* LocationMapModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationMapModelTests.swift; sourceTree = "<group>"; };
 		5AED1B8A93BFB94307B16E22 /* GeneratedTunnelTrustAnchor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneratedTunnelTrustAnchor.swift; sourceTree = "<group>"; };
@@ -238,6 +240,7 @@
 		8B8D3422509ABA223119CA83 /* iPhoneLocationMove */ = {
 			isa = PBXGroup;
 			children = (
+				3062233C69A9B652FDBECEAA /* Assets.xcassets */,
 				B8E777568830D696D1D18D0D /* ContentView.swift */,
 				1FF84545CFAC4FFBE2C11957 /* iPhoneLocationMove-Bridging-Header.h */,
 				DCA09C01A5456C2315754B79 /* App */,
@@ -396,6 +399,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				37810BB8290817FD3574CE15 /* Assets.xcassets in Resources */,
 				AACFEFE0B35594A274809A25 /* helper.py in Resources */,
 				DFB9B81C0AE47F3A9F49D44D /* pymobiledevice3.lock in Resources */,
 				A5F2A55593778AFD042F1A85 /* tunnel-wheelhouse in Resources */,
