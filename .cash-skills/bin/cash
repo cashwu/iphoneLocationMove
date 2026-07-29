@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import importlib.machinery
 import json
 import os
 import stat
@@ -58,22 +59,33 @@ def fail(code: str, message: str) -> None:
     raise SystemExit(1)
 
 
-def open_regular(path: str, expected_mode: int) -> tuple[int, os.stat_result]:
+def open_regular(
+    path: str,
+    expected_mode: int,
+    *,
+    logical: bool = False,
+    error_code: str = "bootstrap_invalid",
+) -> tuple[int, os.stat_result]:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
         opened = os.fstat(descriptor)
         named = os.lstat(path)
     except OSError as error:
-        fail("bootstrap_invalid", f"{path}: {error}")
+        fail(error_code, f"{path}: {error}")
     if (
         not stat.S_ISREG(opened.st_mode)
         or opened.st_nlink != 1
-        or stat.S_IMODE(opened.st_mode) != expected_mode
+        or (
+            git_logical_mode(opened.st_mode)
+            != ("100755" if expected_mode & 0o111 else "100644")
+            if logical
+            else stat.S_IMODE(opened.st_mode) != expected_mode
+        )
         or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
     ):
         os.close(descriptor)
-        fail("bootstrap_invalid", f"{path}: unsafe identity or mode")
+        fail(error_code, f"{path}: unsafe identity or mode")
     return descriptor, opened
 
 
@@ -86,6 +98,292 @@ def sha256_file(path: str) -> str:
     finally:
         os.close(descriptor)
     return digest.hexdigest()
+
+
+def manifest_path_is_present(path: str) -> bool:
+    try:
+        os.lstat(path)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        fail("manifest_invalid", f"{path}: {error}")
+
+
+def portable_relative_path(value: str) -> bool:
+    return bool(
+        value
+        and not value.startswith("/")
+        and "\\" not in value
+        and all(part not in {"", ".", ".."} for part in value.split("/"))
+    )
+
+
+def portable_absolute_path(project_root: str, relative: str) -> str:
+    if not portable_relative_path(relative):
+        fail("manifest_invalid", f"unsafe manifest path: {relative}")
+    current = project_root
+    parts = relative.split("/")
+    for part in parts[:-1]:
+        current = os.path.join(current, part)
+        try:
+            metadata = os.lstat(current)
+        except OSError as error:
+            fail("manifest_invalid", f"{relative}: {error}")
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            fail("manifest_invalid", f"unsafe manifest parent: {relative}")
+    return os.path.join(project_root, relative)
+
+
+def git_logical_mode(mode: int) -> str:
+    return "100755" if mode & 0o111 else "100644"
+
+
+def read_portable_file(
+    project_root: str,
+    relative: str,
+    expected_git_mode: str,
+) -> bytes:
+    path = portable_absolute_path(project_root, relative)
+    try:
+        named_before = os.lstat(path)
+    except OSError as error:
+        fail("manifest_invalid", f"{relative}: {error}")
+    if (
+        not stat.S_ISREG(named_before.st_mode)
+        or named_before.st_nlink != 1
+        or git_logical_mode(named_before.st_mode) != expected_git_mode
+    ):
+        fail("manifest_invalid", f"{relative}: unsafe identity or Git logical mode")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as error:
+        fail("manifest_invalid", f"{relative}: {error}")
+    try:
+        opened = os.fstat(descriptor)
+        named_after_open = os.lstat(path)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino)
+            != (named_after_open.st_dev, named_after_open.st_ino)
+            or git_logical_mode(opened.st_mode) != expected_git_mode
+        ):
+            fail("manifest_invalid", f"{relative}: identity changed while opening")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 131072):
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        named_after_read = os.lstat(path)
+        if (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ) or (after.st_dev, after.st_ino) != (
+            named_after_read.st_dev,
+            named_after_read.st_ino,
+        ):
+            fail("manifest_invalid", f"{relative}: changed while reading")
+        return b"".join(chunks)
+    except OSError as error:
+        fail("manifest_invalid", f"{relative}: {error}")
+    finally:
+        os.close(descriptor)
+
+
+def local_runtime_paths(project_root: str) -> list[str]:
+    runtime_root = portable_absolute_path(
+        project_root,
+        ".cash-skills/lib/cash_cli",
+    )
+    paths: list[str] = []
+    try:
+        for directory, names, files in os.walk(runtime_root, followlinks=False):
+            for name in names:
+                candidate = os.path.join(directory, name)
+                if stat.S_ISLNK(os.lstat(candidate).st_mode):
+                    fail(
+                        "manifest_invalid",
+                        f"runtime directory is a symlink: {candidate}",
+                    )
+            for name in files:
+                if not name.endswith(".py"):
+                    continue
+                absolute = os.path.join(directory, name)
+                paths.append(os.path.relpath(absolute, project_root))
+    except OSError as error:
+        fail("manifest_invalid", f"cannot enumerate runtime inventory: {error}")
+    return sorted(paths, key=lambda value: value.encode("utf-8"))
+
+
+def validate_portable_manifest(project_root: str) -> dict[str, bytes]:
+    manifest_relative = ".cash-skills/manifest.tsv"
+    content = read_portable_file(project_root, manifest_relative, "100644")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        fail("manifest_invalid", "portable manifest must be UTF-8")
+    if not text.endswith("\n") or "\r" in text:
+        fail("manifest_invalid", "portable manifest must be canonical LF text")
+    rows = [line.split("\t") for line in text.splitlines()]
+    if (
+        len(rows) < 6
+        or rows[0] != ["format", "cash-portable-manifest-v1"]
+        or len(rows[1]) != 2
+        or rows[1][0] != "bundle_version"
+        or len(rows[2]) != 2
+        or rows[2][0] != "runtime_generation"
+    ):
+        fail("manifest_invalid", "portable manifest header is invalid")
+    version_parts = rows[1][1].split(".")
+    if (
+        len(version_parts) != 3
+        or any(
+            not part.isascii()
+            or not part.isdigit()
+            or (len(part) > 1 and part.startswith("0"))
+            for part in version_parts
+        )
+    ):
+        fail("manifest_invalid", "portable manifest version is invalid")
+    generation = rows[2][1]
+    if len(generation) != 64 or any(
+        character not in "0123456789abcdef" for character in generation
+    ):
+        fail("manifest_invalid", "portable runtime generation is invalid")
+
+    records: list[tuple[str, str, str, str]] = []
+    seen: set[str] = set()
+    for row in rows[3:]:
+        if (
+            len(row) != 4
+            or row[0] not in {"stable", "runtime", "skill"}
+            or row[3] not in {"100644", "100755"}
+        ):
+            fail("manifest_invalid", "portable manifest record shape is invalid")
+        kind, path, digest, mode = row
+        if (
+            not portable_relative_path(path)
+            or path in seen
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            fail("manifest_invalid", "portable manifest record is invalid")
+        seen.add(path)
+        records.append((kind, path, digest, mode))
+
+    runtime = [
+        (kind, path, digest, mode)
+        for kind, path, digest, mode in records
+        if kind == "runtime"
+    ]
+    runtime_paths = [path for _, path, _, _ in runtime]
+    if (
+        not runtime_paths
+        or runtime_paths
+        != sorted(runtime_paths, key=lambda value: value.encode("utf-8"))
+        or any(
+            not path.startswith(".cash-skills/lib/cash_cli/")
+            or not path.endswith(".py")
+            for path in runtime_paths
+        )
+    ):
+        fail("manifest_invalid", "portable runtime inventory is invalid")
+    expected_order = [
+        ("stable", ".cash-skills/bin/cash"),
+        ("stable", ".cash-workspace.lock"),
+        *(("runtime", path) for path in runtime_paths),
+        *(("skill", path) for path in SKILL_PATHS),
+    ]
+    if [(kind, path) for kind, path, _, _ in records] != expected_order:
+        fail("manifest_invalid", "portable manifest inventory or order is invalid")
+    expected_modes = {
+        ".cash-skills/bin/cash": "100755",
+        **{
+            path: "100644"
+            for _, path in expected_order
+            if path != ".cash-skills/bin/cash"
+        },
+    }
+    if any(mode != expected_modes[path] for _, path, _, mode in records):
+        fail("manifest_invalid", "portable manifest Git logical mode is invalid")
+
+    local_paths = local_runtime_paths(project_root)
+    if runtime_paths != local_paths:
+        missing = sorted(set(runtime_paths) - set(local_paths))
+        extra = sorted(set(local_paths) - set(runtime_paths))
+        fail(
+            "manifest_invalid",
+            f"portable runtime inventory differs: missing={missing}, extra={extra}",
+        )
+
+    verified_runtime: dict[str, bytes] = {}
+    runtime_stream: list[str] = []
+    for kind, path, expected_digest, mode in records:
+        verified = read_portable_file(project_root, path, mode)
+        if hashlib.sha256(verified).hexdigest() != expected_digest:
+            fail("manifest_invalid", f"portable manifest digest drift: {path}")
+        if kind == "runtime":
+            verified_runtime[os.path.join(project_root, path)] = verified
+            runtime_stream.append(f"{path}\t{expected_digest}\t0644\n")
+    actual_generation = hashlib.sha256(
+        "".join(runtime_stream).encode("utf-8")
+    ).hexdigest()
+    if actual_generation != generation:
+        fail("manifest_invalid", "portable runtime generation mismatch")
+    return verified_runtime
+
+
+class VerifiedSourceLoader(importlib.machinery.SourceFileLoader):
+    def __init__(
+        self,
+        fullname: str,
+        path: str,
+        verified_sources: dict[str, bytes],
+    ):
+        super().__init__(fullname, path)
+        self.verified_sources = verified_sources
+
+    def get_code(self, fullname: str):
+        path = os.path.abspath(self.get_filename(fullname))
+        source = self.verified_sources.get(path)
+        if source is None:
+            raise ImportError(f"unverified project-local Cash module: {path}")
+        return self.source_to_code(source, path)
+
+
+def install_verified_importers(
+    project_root: str,
+    verified_sources: dict[str, bytes],
+) -> str:
+    library_root = os.path.join(project_root, ".cash-skills", "lib")
+    search_roots = {library_root}
+    for path in verified_sources:
+        directory = os.path.dirname(path)
+        while directory.startswith(
+            os.path.join(library_root, "cash_cli")
+        ):
+            search_roots.add(directory)
+            parent = os.path.dirname(directory)
+            if parent == directory:
+                break
+            directory = parent
+
+    def loader(fullname: str, path: str) -> VerifiedSourceLoader:
+        return VerifiedSourceLoader(fullname, path, verified_sources)
+
+    for root in search_roots:
+        sys.path_importer_cache[root] = importlib.machinery.FileFinder(
+            root,
+            (loader, importlib.machinery.SOURCE_SUFFIXES),
+        )
+    return library_root
 
 
 def is_source_layout(project_root: str) -> bool:
@@ -284,20 +582,65 @@ if sys.version_info < (3, 11):
 launcher_path = os.path.abspath(__file__)
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(launcher_path)))
 lock_path = os.path.join(project_root, ".cash-workspace.lock")
-launcher_descriptor, launcher_stat = open_regular(launcher_path, 0o755)
+manifest_path = os.path.join(project_root, ".cash-skills", "manifest.tsv")
+portable_mode = manifest_path_is_present(manifest_path)
+launcher_descriptor, launcher_stat = open_regular(
+    launcher_path,
+    0o755,
+    logical=portable_mode,
+    error_code="manifest_invalid" if portable_mode else "bootstrap_invalid",
+)
 os.close(launcher_descriptor)
-lock_descriptor, lock_stat = open_regular(lock_path, 0o644)
+lock_descriptor, lock_stat = open_regular(
+    lock_path,
+    0o644,
+    logical=portable_mode,
+    error_code="manifest_invalid" if portable_mode else "bootstrap_invalid",
+)
 command = sys.argv[1] if len(sys.argv) > 1 else ""
 lock_mode = fcntl.LOCK_EX if command in MUTATING_FAMILIES else fcntl.LOCK_SH
 fcntl.flock(lock_descriptor, lock_mode)
-validate_receipt(project_root, launcher_stat, lock_stat)
+verified_sources: dict[str, bytes] | None = None
+if portable_mode:
+    verified_sources = validate_portable_manifest(project_root)
+else:
+    validate_receipt(project_root, launcher_stat, lock_stat)
 
 os.environ["CASH_PROJECT_ROOT"] = project_root
 os.environ["CASH_LOCK_FD"] = str(lock_descriptor)
-library_root = os.path.join(project_root, ".cash-skills", "lib")
+if verified_sources is not None:
+    sys.dont_write_bytecode = True
+    library_root = install_verified_importers(project_root, verified_sources)
+else:
+    library_root = os.path.join(project_root, ".cash-skills", "lib")
 sys.path.insert(0, library_root)
 
 from cash_cli.main import main
+
+
+if verified_sources is not None:
+    from cash_cli.errors import CashError
+    from cash_cli.workspace import Workspace
+
+    def require_portable_lock(workspace: Workspace) -> None:
+        try:
+            metadata = workspace._require_regular(".cash-workspace.lock")
+        except CashError as error:
+            raise CashError(
+                "workspace_lock_invalid",
+                "Workspace lock is missing or unsafe.",
+                1,
+                ".cash-workspace.lock",
+            ) from error
+        if git_logical_mode(metadata.st_mode) != "100644" or metadata.st_size != 0:
+            raise CashError(
+                "workspace_lock_invalid",
+                "Workspace lock must be an empty non-executable regular file.",
+                1,
+                ".cash-workspace.lock",
+            )
+
+    Workspace._require_lock = require_portable_lock
 
 
 raise SystemExit(main())

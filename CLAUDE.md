@@ -49,7 +49,8 @@
 - 使用者直接給 change 名稱 → 直接讀 `openspec/changes/<name>/` 底下的 artifacts；找不到時，先以 `git rev-parse --show-toplevel` 解析root，再執行該root下 `.cash-skills/bin/cash list --parked --json`
 - 問程式碼或需求相關的問題 → 先使用 `.cash-skills/bin/cash search "<query>" --limit 10 --json`，合法zero-result再以 Grep／Read 搜尋 `openspec/specs/` 與程式碼
 
-## Cash CLI receipt 初始化
+## Cash CLI 啟動信任模式
 
-- `.cash-skills/receipt.tsv` 不進版控，因此 clone 之後它會缺席，`.cash-skills/bin/cash` 會以 `bootstrap_invalid` 失敗。出現該錯誤時，引導使用者在專案根執行一次 `PYTHONPATH=.cash-skills/lib python3 -s -P -B -m cash_cli.installer --init-receipt`（需 Python 3.11+），成功後回報 `initialized` 或 `current`，cash CLI 即可使用。
+- `.cash-skills/manifest.tsv` 存在時，clone／pull 後直接使用 project-local `.cash-skills/bin/cash`；舊的 `.cash-skills/receipt.tsv` 不具權威且不會遮蔽 manifest。manifest 存在但為 invalid manifest 時 MUST fail closed，不得 fallback 到 receipt，也不得執行 `--init-receipt`。
+- 只有 `.cash-skills/manifest.tsv` 缺失的 receipt-based target 在 `.cash-skills/bin/cash` 以 `bootstrap_invalid` 失敗時，才引導使用者在專案根執行一次 `PYTHONPATH=.cash-skills/lib python3 -s -P -B -m cash_cli.installer --init-receipt`（需 Python 3.11+）；成功後回報 `initialized` 或 `current`，cash CLI 即可使用。`.cash-skills/receipt.tsv` 是 machine-local identity，不得提交或跨 clone 共用。
 <!-- CASH:END -->

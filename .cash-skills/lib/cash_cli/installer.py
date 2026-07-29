@@ -21,7 +21,7 @@ from typing import Iterable
 from .config import ConfigError, parse_cash_config, parse_openspec_config
 
 
-BUNDLE_VERSION = "2.11.0"
+BUNDLE_VERSION = "2.12.0"
 VERSION_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 MODE_RE = re.compile(r"0[0-7]{3}\Z")
@@ -68,6 +68,7 @@ BUNDLE_RUNTIME_PATHS = (
 STABLE_PATHS = (".cash-skills/bin/cash", ".cash-workspace.lock")
 GUIDANCE_PATHS = ("AGENTS.md", "CLAUDE.md")
 RECEIPT_PATH = ".cash-skills/receipt.tsv"
+PORTABLE_MANIFEST_PATH = ".cash-skills/manifest.tsv"
 JOURNAL_PATH = ".cash-skills/state/installer/journal.json"
 GITIGNORE_PATH = ".gitignore"
 OPENSPEC_CONFIG_PATH = "openspec/config.yaml"
@@ -83,6 +84,13 @@ GITIGNORE_RULES = (
     b"__pycache__/",
 )
 LEGACY_MANIFEST_PATH = "scripts/cash-skills/legacy-spectra-digests.tsv"
+APPROVED_LAUNCHER_TRANSITIONS = (
+    (
+        "592345fffa009998d48008857ad903d89b0e5f0986d141a5fec26368b527c8a4",
+        "76fe6dd649b1df558ef374d055ca2c5fe4c40a9200b32a1da1d41ca631c3d52f",
+        "2.12.0",
+    ),
+)
 
 
 class InstallerError(Exception):
@@ -122,6 +130,13 @@ class Receipt:
     version: str
     generation: str
     records: tuple[tuple[str, str, str, int, int | None, int | None], ...]
+
+
+@dataclass(frozen=True)
+class PortableManifest:
+    version: str
+    generation: str
+    records: tuple[Record, ...]
 
 
 @dataclass(frozen=True)
@@ -528,6 +543,134 @@ def receipt_bytes(
                 f"{record.kind}\t{record.path}\t{record.digest}\t{record.mode:04o}"
             )
     return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def portable_manifest_bytes(
+    version: str,
+    generation: str,
+    records: Iterable[Record],
+) -> bytes:
+    version_parts(version)
+    if DIGEST_RE.fullmatch(generation) is None:
+        raise InstallerError("portable manifest runtime generation is invalid")
+    lines = [
+        "format\tcash-portable-manifest-v1",
+        f"bundle_version\t{version}",
+        f"runtime_generation\t{generation}",
+    ]
+    for record in records:
+        mode = "100755" if record.mode & 0o111 else "100644"
+        lines.append(
+            f"{record.kind}\t{record.path}\t{record.digest}\t{mode}"
+        )
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def portable_relative_path(value: str) -> bool:
+    return bool(
+        value
+        and not value.startswith("/")
+        and "\\" not in value
+        and all(part not in {"", ".", ".."} for part in value.split("/"))
+    )
+
+
+def parse_portable_manifest(
+    content: bytes,
+    expected_records: tuple[Record, ...] | None = None,
+) -> PortableManifest:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise InstallerError("portable manifest must be UTF-8") from error
+    if not text.endswith("\n") or "\r" in text or "\x00" in text:
+        raise InstallerError("portable manifest must be LF-terminated text")
+    rows = [line.split("\t") for line in text.splitlines()]
+    if (
+        len(rows) < 6
+        or rows[0] != ["format", "cash-portable-manifest-v1"]
+        or len(rows[1]) != 2
+        or rows[1][0] != "bundle_version"
+        or len(rows[2]) != 2
+        or rows[2][0] != "runtime_generation"
+    ):
+        raise InstallerError("portable manifest header or record count is invalid")
+    version_parts(rows[1][1])
+    if DIGEST_RE.fullmatch(rows[2][1]) is None:
+        raise InstallerError("portable manifest runtime generation is invalid")
+    parsed: list[Record] = []
+    seen: set[str] = set()
+    for row in rows[3:]:
+        if (
+            len(row) != 4
+            or row[0] not in {"stable", "runtime", "skill"}
+            or not portable_relative_path(row[1])
+            or row[1] in seen
+            or DIGEST_RE.fullmatch(row[2]) is None
+            or row[3] not in {"100644", "100755"}
+        ):
+            raise InstallerError("portable manifest record is invalid")
+        seen.add(row[1])
+        parsed.append(
+            Record(
+                row[0],
+                row[1],
+                row[2],
+                0o755 if row[3] == "100755" else 0o644,
+            )
+        )
+    runtime_paths = [
+        record.path for record in parsed if record.kind == "runtime"
+    ]
+    skill_paths = [
+        f"{variant}/skills/cash-{skill}/SKILL.md"
+        for variant in (".agents", ".claude")
+        for skill in SKILLS
+    ]
+    expected_order = [
+        ("stable", STABLE_PATHS[0]),
+        ("stable", STABLE_PATHS[1]),
+        *(("runtime", path) for path in runtime_paths),
+        *(("skill", path) for path in skill_paths),
+    ]
+    if (
+        not runtime_paths
+        or runtime_paths
+        != sorted(runtime_paths, key=lambda value: value.encode("utf-8"))
+        or any(
+            not path.startswith(".cash-skills/lib/cash_cli/")
+            or not path.endswith(".py")
+            for path in runtime_paths
+        )
+        or [(record.kind, record.path) for record in parsed] != expected_order
+        or any(
+            record.mode
+            != (0o755 if record.path == STABLE_PATHS[0] else 0o644)
+            for record in parsed
+        )
+    ):
+        raise InstallerError("portable manifest inventory or order is invalid")
+    if expected_records is not None and tuple(
+        (record.kind, record.path, record.mode) for record in parsed
+    ) != tuple(
+        (record.kind, record.path, record.mode) for record in expected_records
+    ):
+        raise InstallerError("portable manifest inventory differs from expected")
+    result = PortableManifest(rows[1][1], rows[2][1], tuple(parsed))
+    if portable_manifest_bytes(
+        result.version,
+        result.generation,
+        result.records,
+    ) != content:
+        raise InstallerError("portable manifest is not canonical")
+    runtime_stream = "".join(
+        f"{record.path}\t{record.digest}\t{record.mode:04o}\n"
+        for record in result.records
+        if record.kind == "runtime"
+    ).encode("utf-8")
+    if sha256(runtime_stream) != result.generation:
+        raise InstallerError("portable manifest runtime generation does not match")
+    return result
 
 
 def parse_receipt(content: bytes, expected_records: tuple[Record, ...]) -> Receipt:
@@ -972,6 +1115,7 @@ def acquire_lock(
     *,
     dry_run: bool,
     create: bool = True,
+    logical_contract: bool = False,
 ) -> tuple[int | None, bool]:
     lock = target / STABLE_PATHS[1]
     existed = lock.exists()
@@ -1003,7 +1147,11 @@ def acquire_lock(
     if (
         not stat.S_ISREG(opened.st_mode)
         or opened.st_nlink != 1
-        or stat.S_IMODE(opened.st_mode) != 0o644
+        or (
+            logical_mode(stat.S_IMODE(opened.st_mode)) != 0o644
+            if logical_contract
+            else stat.S_IMODE(opened.st_mode) != 0o644
+        )
         or opened.st_size != 0
         or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
     ):
@@ -1012,23 +1160,33 @@ def acquire_lock(
     return descriptor, not existed
 
 
-def publish_launcher(source: Path, target: Path, *, dry_run: bool) -> bool:
+def launcher_update(
+    source: Path,
+    target: Path,
+    version: str,
+) -> bytes | None:
     source_bytes, _ = read_regular(source, STABLE_PATHS[0], expected_mode=0o755)
     existing = optional_snapshot(target, STABLE_PATHS[0])
-    if existing.exists:
-        if existing.content != source_bytes or existing.mode != 0o755:
-            raise InstallerError("stable launcher drift requires an unsupported bootstrap migration")
-        return False
-    if dry_run:
-        return True
-    atomic_write(
-        target,
-        STABLE_PATHS[0],
-        source_bytes,
-        0o755,
-        expected=existing,
+    if not existing.exists:
+        return source_bytes
+    if existing.content == source_bytes and existing.mode == 0o755:
+        return None
+    if existing.mode != 0o755:
+        raise InstallerError("stable launcher has an invalid mode")
+    old_digest = sha256(existing.content or b"")
+    new_digest = sha256(source_bytes)
+    approved = any(
+        old_digest == approved_old
+        and new_digest == approved_new
+        and compare_versions(version, introduced_version) >= 0
+        for approved_old, approved_new, introduced_version
+        in APPROVED_LAUNCHER_TRANSITIONS
     )
-    return True
+    if not approved:
+        raise InstallerError(
+            "stable launcher drift requires an approved exact bootstrap migration"
+        )
+    return source_bytes
 
 
 def wait_for_inflight_receipt(
@@ -1049,6 +1207,163 @@ def wait_for_inflight_receipt(
     finally:
         if descriptor is not None:
             os.close(descriptor)
+
+
+def path_is_present(root: Path, relative: str) -> bool:
+    path = ensure_contained(root, relative)
+    try:
+        os.lstat(path)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise InstallerError(f"cannot inspect {relative}: {error}") from error
+
+
+def logical_mode(mode: int | None) -> int | None:
+    if mode is None:
+        return None
+    return 0o755 if mode & 0o111 else 0o644
+
+
+def validate_portable_target(
+    target: Path,
+    manifest: PortableManifest,
+) -> list[str]:
+    conflicts: list[str] = []
+    for record in manifest.records:
+        snapshot = optional_snapshot(target, record.path)
+        if not snapshot.exists:
+            if record.kind == "stable":
+                raise InstallerError(
+                    f"portable stable path is missing: {record.path}"
+                )
+            conflicts.append(record.path)
+            continue
+        if (
+            logical_mode(snapshot.mode) != record.mode
+            or sha256(snapshot.content or b"") != record.digest
+        ):
+            if record.kind == "stable":
+                raise InstallerError(
+                    f"portable stable path drift: {record.path}"
+                )
+            conflicts.append(record.path)
+    actual_runtime = set(portable_runtime_paths(target))
+    expected_runtime = {
+        record.path for record in manifest.records if record.kind == "runtime"
+    }
+    extra = sorted(actual_runtime - expected_runtime)
+    if extra:
+        raise InstallerError(
+            "portable runtime contains unknown paths: " + ", ".join(extra)
+        )
+    conflicts.extend(sorted(expected_runtime - actual_runtime))
+    return sorted(set(conflicts))
+
+
+def portable_runtime_paths(target: Path) -> tuple[str, ...]:
+    runtime_root = target / ".cash-skills" / "lib" / "cash_cli"
+    if runtime_root.is_symlink() or not runtime_root.is_dir():
+        return ()
+    paths: list[str] = []
+    try:
+        for directory, names, files in os.walk(runtime_root, followlinks=False):
+            for name in names:
+                candidate = Path(directory) / name
+                if candidate.is_symlink():
+                    raise InstallerError(
+                        "portable runtime directory is a symlink: "
+                        + candidate.relative_to(target).as_posix()
+                    )
+            for name in files:
+                if name.endswith(".py"):
+                    paths.append(
+                        (Path(directory) / name).relative_to(target).as_posix()
+                    )
+    except OSError as error:
+        raise InstallerError(
+            f"cannot enumerate portable runtime inventory: {error}"
+        ) from error
+    return tuple(sorted(paths, key=lambda value: value.encode("utf-8")))
+
+
+def vendored_planned_paths(
+    records: tuple[Record, ...],
+) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            (
+                *(record.path for record in records),
+                PORTABLE_MANIFEST_PATH,
+                ".cash.yaml",
+                OPENSPEC_CONFIG_PATH,
+                *GUIDANCE_PATHS,
+                GITIGNORE_PATH,
+            )
+        )
+    )
+
+
+def git_excluded_paths(target: Path, relatives: Iterable[str]) -> tuple[str, ...]:
+    blocked: list[str] = []
+    for relative in relatives:
+        tracked = subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=",
+                "-C",
+                str(target),
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                relative,
+            ],
+            check=False,
+            capture_output=True,
+        )
+        if tracked.returncode == 0:
+            continue
+        if tracked.returncode != 1:
+            raise InstallerError(
+                f"cannot query Git index for {relative}"
+            )
+        ignored = subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=",
+                "-C",
+                str(target),
+                "check-ignore",
+                "--no-index",
+                "-q",
+                "--",
+                relative,
+            ],
+            check=False,
+            capture_output=True,
+        )
+        if ignored.returncode == 0:
+            blocked.append(relative)
+        elif ignored.returncode != 1:
+            raise InstallerError(
+                f"cannot evaluate Git excludes for {relative}"
+            )
+    return tuple(blocked)
+
+
+def require_vendored_paths_committable(
+    target: Path,
+    relatives: Iterable[str],
+) -> None:
+    blocked = git_excluded_paths(target, relatives)
+    if blocked:
+        raise InstallerError(
+            "planned vendored paths are excluded by Git: "
+            + ", ".join(blocked)
+        )
 
 
 def validate_installed_receipt(
@@ -1078,6 +1393,35 @@ def validate_installed_receipt(
     return conflicts
 
 
+def rebind_receipt_stable_identity(content: bytes, target: Path) -> bytes:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise InstallerError("cannot rebind non-UTF-8 receipt") from error
+    if not text.endswith("\n") or "\r" in text:
+        raise InstallerError("cannot rebind malformed receipt")
+    rows = [line.split("\t") for line in text.splitlines()]
+    rebound: list[str] = []
+    stable_seen: set[str] = set()
+    for row in rows:
+        if len(row) == 6 and row[0] == "stable" and row[1] in STABLE_PATHS:
+            metadata = os.lstat(target / row[1])
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+            ):
+                raise InstallerError(
+                    f"cannot rebind unsafe stable identity: {row[1]}"
+                )
+            row[4] = str(metadata.st_dev)
+            row[5] = str(metadata.st_ino)
+            stable_seen.add(row[1])
+        rebound.append("\t".join(row))
+    if stable_seen != set(STABLE_PATHS):
+        raise InstallerError("cannot rebind receipt without both stable records")
+    return ("\n".join(rebound) + "\n").encode("utf-8")
+
+
 class InstallTransaction:
     def __init__(self, target: Path, hooks: TestHooks | None = None):
         self.target = target
@@ -1096,6 +1440,63 @@ class InstallTransaction:
             }
         )
 
+    def add_launcher(self, content: bytes) -> None:
+        self.operations.append(
+            {
+                "kind": "launcher",
+                "path": STABLE_PATHS[0],
+                "content": content,
+                "mode": 0o755,
+                "before": optional_snapshot(self.target, STABLE_PATHS[0]),
+            }
+        )
+
+    def add_receipt(
+        self,
+        version: str,
+        generation: str,
+        records: tuple[Record, ...],
+    ) -> None:
+        self.operations.append(
+            {
+                "kind": "receipt",
+                "path": RECEIPT_PATH,
+                "version": version,
+                "generation": generation,
+                "records": records,
+                "before": optional_snapshot(self.target, RECEIPT_PATH),
+            }
+        )
+
+    def add_manifest(self, content: bytes) -> None:
+        self.operations.append(
+            {
+                "kind": "manifest",
+                "path": PORTABLE_MANIFEST_PATH,
+                "content": content,
+                "mode": 0o644,
+                "before": optional_snapshot(self.target, PORTABLE_MANIFEST_PATH),
+            }
+        )
+
+    def add_delete(self, relative: str) -> None:
+        self.operations.append(
+            {
+                "kind": "delete",
+                "path": relative,
+                "before": optional_snapshot(self.target, relative),
+            }
+        )
+
+    def add_receipt_delete(self) -> None:
+        self.operations.append(
+            {
+                "kind": "receipt_delete",
+                "path": RECEIPT_PATH,
+                "before": optional_snapshot(self.target, RECEIPT_PATH),
+            }
+        )
+
     def add_legacy_delete(self, candidate: dict[str, int | str]) -> None:
         relative = str(candidate["path"])
         parent = Path(relative).parent.as_posix()
@@ -1108,25 +1509,43 @@ class InstallTransaction:
             }
         )
 
+    @staticmethod
+    def _snapshot_fields(before: Snapshot) -> dict[str, object]:
+        return {
+            "exists": before.exists,
+            "content": (
+                base64.b64encode(before.content or b"").decode("ascii")
+                if before.exists
+                else None
+            ),
+            "mode": before.mode,
+            "device": before.device,
+            "inode": before.inode,
+        }
+
     def _journal(self, published: int, phase: str = "publishing") -> bytes:
         rows = []
         for operation in self.operations:
-            if operation["kind"] == "write":
+            if operation["kind"] in {
+                "write",
+                "launcher",
+                "receipt",
+                "manifest",
+                "delete",
+                "receipt_delete",
+            }:
                 before = operation["before"]
                 assert isinstance(before, Snapshot)
-                rows.append(
-                    {
-                        "kind": "write",
-                        "path": operation["path"],
-                        "exists": before.exists,
-                        "content": (
-                            base64.b64encode(before.content or b"").decode("ascii")
-                            if before.exists
-                            else None
-                        ),
-                        "mode": before.mode,
-                    }
-                )
+                row = {
+                    "kind": operation["kind"],
+                    "path": operation["path"],
+                    **self._snapshot_fields(before),
+                }
+                content = operation.get("content")
+                if isinstance(content, bytes):
+                    row["after_digest"] = sha256(content)
+                    row["after_mode"] = operation.get("mode")
+                rows.append(row)
             else:
                 rows.append(
                     {
@@ -1138,7 +1557,7 @@ class InstallTransaction:
         return (
             json.dumps(
                 {
-                    "version": 2,
+                    "version": 3,
                     "phase": phase,
                     "published": published,
                     "operations": rows,
@@ -1154,34 +1573,34 @@ class InstallTransaction:
         ensure_directories(self.target, str(Path(JOURNAL_PATH).parent))
         atomic_write(self.target, JOURNAL_PATH, self._journal(0), 0o600)
         published = 0
+        phase = "publishing"
         try:
             for operation in self.operations:
                 next_published = published + 1
                 atomic_write(
                     self.target,
                     JOURNAL_PATH,
-                    self._journal(next_published),
+                    self._journal(next_published, phase),
                     0o600,
                 )
-                if operation["kind"] == "write":
-                    before = operation["before"]
-                    assert isinstance(before, Snapshot)
+                self._publish_operation(operation)
+                published = next_published
+                if operation["kind"] == "manifest":
+                    phase = "portable_cutover"
                     atomic_write(
                         self.target,
-                        str(operation["path"]),
-                        bytes(operation["content"]),
-                        int(operation["mode"]),
-                        expected=before,
+                        JOURNAL_PATH,
+                        self._journal(published, phase),
+                        0o600,
                     )
-                else:
-                    self._publish_legacy_delete(operation)
-                published = next_published
                 if self.hooks.fail_after == published:
                     raise InstallerError(f"injected publication failure after {published}")
                 fail_path = self.hooks.fail_after_path
                 if fail_path and operation["path"] == fail_path:
                     raise InstallerError(f"injected publication failure after {fail_path}")
         except Exception:
+            if phase == "portable_cutover":
+                raise
             try:
                 self.rollback(published)
                 self.cleanup_journal()
@@ -1204,6 +1623,68 @@ class InstallTransaction:
             ) from error
         self.cleanup_journal()
 
+    def _publish_operation(self, operation: dict[str, object]) -> None:
+        kind = str(operation["kind"])
+        if kind in {"write", "launcher", "manifest"}:
+            before = operation["before"]
+            assert isinstance(before, Snapshot)
+            atomic_write(
+                self.target,
+                str(operation["path"]),
+                bytes(operation["content"]),
+                int(operation["mode"]),
+                expected=before,
+            )
+            return
+        if kind == "receipt":
+            before = operation["before"]
+            records = operation["records"]
+            assert isinstance(before, Snapshot)
+            assert isinstance(records, tuple)
+            content = receipt_bytes(
+                str(operation["version"]),
+                str(operation["generation"]),
+                records,
+                self.target,
+            )
+            atomic_write(
+                self.target,
+                RECEIPT_PATH,
+                content,
+                0o644,
+                expected=before,
+            )
+            return
+        if kind == "receipt_delete":
+            self._publish_receipt_delete(operation)
+            return
+        if kind == "delete":
+            self._publish_delete(operation)
+            return
+        self._publish_legacy_delete(operation)
+
+    def _publish_delete(self, operation: dict[str, object]) -> None:
+        before = operation["before"]
+        assert isinstance(before, Snapshot)
+        relative = str(operation["path"])
+        if not before.exists:
+            return
+        if not snapshot_matches(self.target, relative, before):
+            raise InstallerError(f"managed path changed before deletion: {relative}")
+        ensure_contained(self.target, relative).unlink()
+
+    def _publish_receipt_delete(self, operation: dict[str, object]) -> None:
+        before = operation["before"]
+        assert isinstance(before, Snapshot)
+        if not before.exists:
+            return
+        if not optional_snapshot(self.target, RECEIPT_PATH).exists:
+            return
+        if not snapshot_matches(self.target, RECEIPT_PATH, before):
+            raise InstallerError("receipt changed before portable cleanup")
+        path = ensure_contained(self.target, RECEIPT_PATH)
+        path.unlink()
+
     def rollback(self, published: int) -> None:
         for operation in reversed(self.operations[:published]):
             if operation["kind"] == "legacy_delete":
@@ -1223,7 +1704,18 @@ class InstallTransaction:
                     ):
                         raise InstallerError(
                             f"legacy rollback identity drift: {operation['path']}"
-                        )
+                    )
+                continue
+            if operation["kind"] == "receipt_delete":
+                before = operation["before"]
+                assert isinstance(before, Snapshot)
+                if before.exists:
+                    atomic_write(
+                        self.target,
+                        RECEIPT_PATH,
+                        before.content or b"",
+                        before.mode or 0o644,
+                    )
                 continue
             relative = str(operation["path"])
             before = operation["before"]
@@ -1236,11 +1728,38 @@ class InstallTransaction:
                     before.content or b"",
                     before.mode or 0o644,
                 )
+            elif operation["kind"] == "launcher":
+                continue
             elif path.exists():
                 metadata = os.lstat(path)
                 if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
                     raise InstallerError(f"rollback target is unsafe: {relative}")
                 path.unlink()
+        if any(
+            operation["kind"] == "launcher"
+            for operation in self.operations[:published]
+        ):
+            old_receipt = next(
+                (
+                    operation["before"]
+                    for operation in self.operations
+                    if operation["kind"] in {"receipt", "receipt_delete"}
+                    and isinstance(operation.get("before"), Snapshot)
+                    and operation["before"].exists
+                ),
+                None,
+            )
+            if isinstance(old_receipt, Snapshot):
+                rebound = rebind_receipt_stable_identity(
+                    old_receipt.content or b"",
+                    self.target,
+                )
+                atomic_write(
+                    self.target,
+                    RECEIPT_PATH,
+                    rebound,
+                    old_receipt.mode or 0o644,
+                )
 
     def _publish_legacy_delete(self, operation: dict[str, object]) -> None:
         candidate = inspect_legacy_candidate(
@@ -1333,20 +1852,31 @@ def recover_installer(target: Path) -> bool:
     content, _ = read_regular(target, JOURNAL_PATH, expected_mode=0o600)
     try:
         document = json.loads(content)
-        if document.get("version") != 2:
+        schema = document.get("version")
+        if schema not in {2, 3}:
             raise InstallerError(
                 "cannot recover installer journal; use a matching or newer installer"
             )
         if (
             set(document) != {"version", "phase", "published", "operations"}
-            or document["phase"] not in {"publishing", "committed"}
+            or document["phase"]
+            not in {"publishing", "portable_cutover", "committed"}
         ):
             raise ValueError("invalid journal schema")
         operations = document["operations"]
         published = int(document["published"])
+        if published < 0 or published > len(operations):
+            raise ValueError("invalid publication ledger")
         transaction = InstallTransaction(target)
         for item in operations:
-            if item["kind"] == "write":
+            if item["kind"] in {
+                "write",
+                "launcher",
+                "receipt",
+                "manifest",
+                "delete",
+                "receipt_delete",
+            }:
                 before = Snapshot(
                     bool(item["exists"]),
                     (
@@ -1355,21 +1885,47 @@ def recover_installer(target: Path) -> bool:
                         else None
                     ),
                     item["mode"],
+                    item.get("device"),
+                    item.get("inode"),
                 )
                 transaction.operations.append(
                     {
-                        "kind": "write",
+                        "kind": item["kind"],
                         "path": item["path"],
                         "content": b"",
-                        "mode": 0o644,
+                        "mode": item.get("after_mode", 0o644),
                         "before": before,
+                        "after_digest": item.get("after_digest"),
                     }
                 )
             else:
                 transaction.operations.append(dict(item))
-        if document["phase"] == "committed":
+        portable_cutover = document["phase"] == "portable_cutover"
+        if schema == 3 and not portable_cutover:
+            for index, item in enumerate(operations[:published]):
+                if item["kind"] != "manifest":
+                    continue
+                snapshot = optional_snapshot(target, str(item["path"]))
+                portable_cutover = bool(
+                    snapshot.exists
+                    and snapshot.mode == item.get("after_mode")
+                    and sha256(snapshot.content or b"")
+                    == item.get("after_digest")
+                )
+                if portable_cutover and any(
+                    later["kind"] != "receipt_delete"
+                    for later in operations[index + 1 :]
+                ):
+                    raise ValueError(
+                        "portable manifest is not the final trust-bearing operation"
+                    )
+        if document["phase"] == "committed" or portable_cutover:
             if published != len(operations):
-                raise ValueError("committed journal has incomplete publication ledger")
+                if document["phase"] == "committed":
+                    raise ValueError("committed journal has incomplete publication ledger")
+            for operation in transaction.operations:
+                if operation["kind"] == "receipt_delete":
+                    transaction._publish_receipt_delete(operation)
             transaction._remove_quarantines(committed=True)
         else:
             transaction.rollback(published)
@@ -1397,6 +1953,10 @@ def install_target(
     if not target.is_dir() or target == source:
         raise InstallerError("target must be an existing non-source directory")
     validate_target_prerequisites(target, allow_missing_config=True)
+    if path_is_present(target, PORTABLE_MANIFEST_PATH):
+        raise InstallerError(
+            "target is managed by a portable manifest; use --vendor"
+        )
     # Reclassification re-enters this function; the diagnostic stays one line
     # per target rather than one line per retry.
     if announce_tracking:
@@ -1608,9 +2168,11 @@ def install_target(
                 force=force,
                 announce_tracking=False,
             )
-        launcher_changed = publish_launcher(source, target, dry_run=dry_run)
+        launcher_content = launcher_update(source, target, version)
 
         transaction = InstallTransaction(target, hooks)
+        if launcher_content is not None:
+            transaction.add_launcher(launcher_content)
         for record in records:
             if record.kind == "stable":
                 continue
@@ -1665,7 +2227,7 @@ def install_target(
                 file=sys.stderr,
             )
 
-        would_change = bool(transaction.operations) or launcher_changed or receipt is None
+        would_change = bool(transaction.operations) or receipt is None
         if receipt is not None and not would_change:
             expected_receipt = receipt_bytes(version, generation, records, target)
             would_change = expected_receipt != (receipt_snapshot.content or b"")
@@ -1689,8 +2251,311 @@ def install_target(
             or legacy_candidates(target, legacy_records) != planned_legacy_candidates
         ):
             raise InstallerError("installation inputs changed after lock acquisition")
-        new_receipt = receipt_bytes(version, generation, records, target)
-        transaction.add(RECEIPT_PATH, new_receipt, 0o644)
+        transaction.add_receipt(version, generation, records)
+        transaction.commit()
+        return "update"
+    finally:
+        if lock_descriptor is not None:
+            os.close(lock_descriptor)
+
+
+def install_vendored_target(
+    source: Path,
+    target_input: str,
+    *,
+    dry_run: bool,
+    force: bool,
+    announce_tracking: bool = True,
+) -> str:
+    if sys.version_info < (3, 11):
+        raise InstallerError("Cash installer requires Python 3.11+")
+    if not target_input or target_input == "/" or Path(target_input).is_symlink():
+        raise InstallerError("vendor target must be a safe existing directory")
+    target = Path(target_input).resolve()
+    if not target.is_dir() or target == source:
+        raise InstallerError("vendor target must be an existing non-source directory")
+    validate_target_prerequisites(target, allow_missing_config=True)
+    version, records, generation = source_inventory(source)
+    manifest_content = portable_manifest_bytes(version, generation, records)
+    planned_paths = vendored_planned_paths(records)
+    source_watch_paths = (
+        "cash-skills.version",
+        ".cash.yaml",
+        LEGACY_MANIFEST_PATH,
+        *GUIDANCE_PATHS,
+        *(record.path for record in records),
+    )
+    target_watch_paths = tuple(
+        relative
+        for relative in dict.fromkeys(
+            (
+                *planned_paths,
+                RECEIPT_PATH,
+                ".spectra.yaml",
+                *(record.path for record in records),
+            )
+        )
+        if relative != STABLE_PATHS[1]
+    )
+    prelock_source_inputs = snapshots(source, source_watch_paths)
+    prelock_target_inputs = snapshots(target, target_watch_paths)
+    require_vendored_paths_committable(target, planned_paths)
+    for relative in (*planned_paths, RECEIPT_PATH):
+        ensure_contained(target, relative)
+    hooks = test_hooks()
+
+    manifest_snapshot: Snapshot
+    manifest: PortableManifest | None = None
+    if path_is_present(target, PORTABLE_MANIFEST_PATH):
+        ensure_regular_shape(target, PORTABLE_MANIFEST_PATH)
+        manifest_snapshot = optional_snapshot(target, PORTABLE_MANIFEST_PATH)
+        if logical_mode(manifest_snapshot.mode) != 0o644:
+            raise InstallerError("portable manifest must be non-executable")
+        manifest = parse_portable_manifest(
+            manifest_snapshot.content or b"",
+        )
+        obsolete_paths = tuple(
+            record.path
+            for record in manifest.records
+            if record.path not in {current.path for current in records}
+        )
+        planned_paths = tuple(dict.fromkeys((*planned_paths, *obsolete_paths)))
+        require_vendored_paths_committable(target, planned_paths)
+        added_watch_paths = tuple(
+            path for path in obsolete_paths if path not in target_watch_paths
+        )
+        if added_watch_paths:
+            prelock_target_inputs += snapshots(target, added_watch_paths)
+            target_watch_paths += added_watch_paths
+    else:
+        manifest_snapshot = Snapshot(False)
+
+    receipt_snapshot: Snapshot
+    receipt: Receipt | None = None
+    if path_is_present(target, RECEIPT_PATH):
+        ensure_regular_shape(target, RECEIPT_PATH)
+        receipt_snapshot = optional_snapshot(target, RECEIPT_PATH)
+        if manifest is None:
+            receipt = parse_receipt(receipt_snapshot.content or b"", records)
+    else:
+        receipt_snapshot = Snapshot(False)
+
+    target_version = manifest.version if manifest else (
+        receipt.version if receipt else None
+    )
+    journal_present = installer_journal_present(target)
+    if journal_present and announce_tracking:
+        print(f"{target}: unfinished installer journal detected", file=sys.stderr)
+    if target_version is not None and compare_versions(version, target_version) < 0:
+        if journal_present:
+            print(
+                f"{target}: use the matching newer installer to recover this journal",
+                file=sys.stderr,
+            )
+        return "newer"
+    if journal_present and not dry_run:
+        recovery_lock, _ = acquire_lock(
+            target,
+            dry_run=False,
+            create=False,
+            logical_contract=True,
+        )
+        try:
+            recovered = recover_installer(target)
+        finally:
+            if recovery_lock is not None:
+                os.close(recovery_lock)
+        if recovered:
+            return install_vendored_target(
+                source,
+                str(target),
+                dry_run=dry_run,
+                force=force,
+                announce_tracking=False,
+            )
+
+    source_config, _ = read_regular(source, ".cash.yaml", expected_mode=0o644)
+    try:
+        parse_cash_config(source_config.decode("utf-8"), path=".cash.yaml")
+    except (UnicodeDecodeError, ConfigError) as error:
+        raise InstallerError(f"invalid source .cash.yaml: {error}") from error
+    planned_config, config_changed = config_plan(source, target)
+    guidance: list[tuple[str, bytes, int, bool]] = []
+    for relative in GUIDANCE_PATHS:
+        rendered, mode, changed = render_guidance(source, target, relative)
+        guidance.append((relative, rendered, mode, changed))
+    legacy_records = legacy_manifest(source)
+    planned_legacy_candidates = legacy_candidates(target, legacy_records)
+
+    conflicts: list[str] = []
+    if manifest is not None:
+        conflicts.extend(validate_portable_target(target, manifest))
+        if compare_versions(version, manifest.version) == 0 and (
+            manifest.generation != generation
+            or tuple(
+                (record.kind, record.path, record.digest, record.mode)
+                for record in manifest.records
+            )
+            != tuple(
+                (record.kind, record.path, record.digest, record.mode)
+                for record in records
+            )
+        ):
+            raise InstallerError("equal-version portable source integrity drift")
+    elif receipt is not None:
+        conflicts.extend(validate_installed_receipt(target, receipt, records))
+        if compare_versions(version, receipt.version) == 0:
+            if receipt.generation != generation or any(
+                parsed[2] != source_record.digest
+                for parsed, source_record in zip(
+                    receipt.records,
+                    records,
+                    strict=True,
+                )
+            ):
+                raise InstallerError("equal-version receipt source integrity drift")
+    else:
+        actual_runtime = set(portable_runtime_paths(target))
+        expected_runtime = {
+            record.path for record in records if record.kind == "runtime"
+        }
+        extra_runtime = sorted(actual_runtime - expected_runtime)
+        if extra_runtime:
+            raise InstallerError(
+                "vendored runtime contains unknown paths: "
+                + ", ".join(extra_runtime)
+            )
+        present: list[Record] = []
+        exact: list[Record] = []
+        for record in records:
+            snapshot = optional_snapshot(target, record.path)
+            if not snapshot.exists:
+                continue
+            present.append(record)
+            if (
+                logical_mode(snapshot.mode) == record.mode
+                and sha256(snapshot.content or b"") == record.digest
+            ):
+                exact.append(record)
+            elif record.kind == "stable":
+                if record.path == STABLE_PATHS[1]:
+                    raise InstallerError("vendored workspace lock drift")
+                launcher_update(source, target, version)
+            else:
+                conflicts.append(record.path)
+        if (target / STABLE_PATHS[0]).exists() and not (
+            target / STABLE_PATHS[1]
+        ).exists():
+            raise InstallerError("launcher exists without stable workspace lock")
+        complete_exact = len(exact) == len(records)
+        present_replaceable = [
+            record for record in present if record.kind != "stable"
+        ]
+        if present_replaceable and not complete_exact and not force:
+            return "conflict"
+        if force:
+            conflicts.extend(
+                record.path
+                for record in records
+                if record.kind != "stable" and record not in exact
+            )
+
+    if conflicts and not force:
+        return "conflict"
+
+    lock_descriptor, _ = acquire_lock(
+        target,
+        dry_run=dry_run,
+        logical_contract=True,
+    )
+    try:
+        if hooks.hold and not dry_run:
+            wait_for_test_hold("CASH_INSTALL_HOLD_FILE", hooks.hold)
+        validate_target_prerequisites(target, allow_missing_config=True)
+        if source_inventory(source) != (version, records, generation):
+            raise InstallerError("vendored source inventory changed before lock acquisition")
+        if snapshots(source, source_watch_paths) != prelock_source_inputs:
+            raise InstallerError("vendored source inputs changed before lock acquisition")
+        if snapshots(target, target_watch_paths) != prelock_target_inputs:
+            raise InstallerError("vendored target inputs changed before lock acquisition")
+        require_vendored_paths_committable(target, planned_paths)
+        launcher_content = launcher_update(source, target, version)
+
+        locked_target_inputs = snapshots(target, target_watch_paths)
+        locked_source_inputs = snapshots(source, source_watch_paths)
+
+        transaction = InstallTransaction(target, hooks)
+        if launcher_content is not None:
+            transaction.add_launcher(launcher_content)
+        if manifest is not None:
+            current_paths = {record.path for record in records}
+            for old_record in manifest.records:
+                if old_record.path not in current_paths:
+                    transaction.add_delete(old_record.path)
+        for record in records:
+            if record.kind == "stable":
+                continue
+            source_content, _ = read_regular(
+                source,
+                record.path,
+                expected_mode=record.mode,
+            )
+            if sha256(source_content) != record.digest:
+                raise InstallerError(
+                    f"vendored source digest changed while planning: {record.path}"
+                )
+            current = optional_snapshot(target, record.path)
+            if (
+                not current.exists
+                or logical_mode(current.mode) != record.mode
+                or sha256(current.content or b"") != record.digest
+            ):
+                transaction.add(record.path, source_content, record.mode)
+        if config_changed and planned_config is not None:
+            transaction.add(".cash.yaml", planned_config, 0o644)
+        openspec_snapshot = dict(locked_target_inputs)[OPENSPEC_CONFIG_PATH]
+        planned_openspec_config = openspec_config_plan(openspec_snapshot)
+        if planned_openspec_config is not None:
+            transaction.add(
+                OPENSPEC_CONFIG_PATH,
+                planned_openspec_config,
+                0o644,
+            )
+        for relative, rendered, mode, changed in guidance:
+            if changed:
+                transaction.add(relative, rendered, mode)
+        for candidate in planned_legacy_candidates:
+            if candidate.get("removable"):
+                transaction.add_legacy_delete(candidate)
+        planned_gitignore = gitignore_plan(
+            dict(locked_target_inputs)[GITIGNORE_PATH]
+        )
+        if planned_gitignore is not None:
+            transaction.add(GITIGNORE_PATH, *planned_gitignore)
+        current_manifest = optional_snapshot(target, PORTABLE_MANIFEST_PATH)
+        if (
+            not current_manifest.exists
+            or current_manifest.content != manifest_content
+            or logical_mode(current_manifest.mode) != 0o644
+        ):
+            transaction.add_manifest(manifest_content)
+        if receipt_snapshot.exists:
+            transaction.add_receipt_delete()
+
+        if not transaction.operations:
+            return "current"
+        if dry_run:
+            return "update"
+        if hooks.publication_hold:
+            wait_for_test_hold(
+                "CASH_INSTALL_PUBLICATION_HOLD_FILE",
+                hooks.publication_hold,
+            )
+        if snapshots(target, target_watch_paths) != locked_target_inputs:
+            raise InstallerError("vendored target changed after lock acquisition")
+        if snapshots(source, source_watch_paths) != locked_source_inputs:
+            raise InstallerError("vendored source changed after lock acquisition")
+        require_vendored_paths_committable(target, planned_paths)
         transaction.commit()
         return "update"
     finally:
@@ -1708,7 +2573,11 @@ def bootstrap_source(source: Path, *, dry_run: bool) -> str:
         parse_cash_config(source_config.decode("utf-8"), path=".cash.yaml")
     except (UnicodeDecodeError, ConfigError) as error:
         raise InstallerError(f"invalid source .cash.yaml: {error}") from error
-    ensure_contained(source, RECEIPT_PATH)
+    for relative in (PORTABLE_MANIFEST_PATH, RECEIPT_PATH):
+        ensure_contained(source, relative)
+        if path_is_present(source, relative):
+            ensure_regular_shape(source, relative)
+    manifest_content = portable_manifest_bytes(version, generation, records)
 
     lock_descriptor, _ = acquire_lock(source, dry_run=dry_run)
     try:
@@ -1724,21 +2593,22 @@ def bootstrap_source(source: Path, *, dry_run: bool) -> str:
         if locked_config != source_config:
             raise InstallerError("source .cash.yaml changed while acquiring lock")
 
+        manifest_snapshot = optional_snapshot(source, PORTABLE_MANIFEST_PATH)
         receipt_snapshot = optional_snapshot(source, RECEIPT_PATH)
-        expected = receipt_bytes(version, generation, records, source)
-        if receipt_snapshot.exists and receipt_snapshot.content == expected:
-            if receipt_snapshot.mode != 0o644:
-                raise InstallerError("source receipt mode is invalid")
+        transaction = InstallTransaction(source)
+        if (
+            not manifest_snapshot.exists
+            or manifest_snapshot.content != manifest_content
+            or manifest_snapshot.mode != 0o644
+        ):
+            transaction.add_manifest(manifest_content)
+        if receipt_snapshot.exists:
+            transaction.add_receipt_delete()
+        if not transaction.operations:
             return "current"
         if dry_run:
             return "would-bootstrap"
-        atomic_write(
-            source,
-            RECEIPT_PATH,
-            expected,
-            0o644,
-            expected=receipt_snapshot,
-        )
+        transaction.commit()
         return "bootstrap"
     finally:
         if lock_descriptor is not None:
@@ -1804,6 +2674,13 @@ def init_validate_config(root: Path) -> None:
             "init_config_invalid",
             f"invalid {OPENSPEC_CONFIG_PATH}: {error}",
         ) from error
+
+
+def init_manifest_present(root: Path) -> bool:
+    try:
+        return path_is_present(root, PORTABLE_MANIFEST_PATH)
+    except InstallerError as error:
+        raise InitError("init_vendored_bundle", str(error)) from error
 
 
 def init_managed_shape(root: Path, relative: str) -> Path:
@@ -2022,9 +2899,20 @@ def init_receipt() -> str:
             "this is the canonical Cash source repository; run "
             "./install-cash-skills.fish --self from the project root",
         )
+    if init_manifest_present(root):
+        raise InitError(
+            "init_vendored_bundle",
+            "this target is managed by a portable manifest; "
+            "--init-receipt is not permitted",
+        )
     init_validate_config(root)
     descriptor = init_acquire_lock(root)
     try:
+        if init_manifest_present(root):
+            raise InitError(
+                "init_vendored_bundle",
+                "a portable manifest appeared while acquiring the workspace lock",
+            )
         inventory = init_inventory(root)
         init_normalize_modes(root, inventory)
         return init_publish_receipt(root, init_records(root, inventory))
@@ -2128,6 +3016,7 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="install-cash-skills.fish")
     modes = result.add_mutually_exclusive_group(required=True)
     modes.add_argument("--target", metavar="<project>")
+    modes.add_argument("--vendor", metavar="<project>")
     modes.add_argument("--self", action="store_true")
     modes.add_argument("--register", metavar="<project>")
     modes.add_argument("--unregister", metavar="<project>")
@@ -2142,21 +3031,29 @@ def parser() -> argparse.ArgumentParser:
 def run(arguments: list[str] | None = None) -> int:
     options = parser().parse_args(arguments)
     source = Path(__file__).resolve().parents[3]
-    for name in ("target", "register", "unregister"):
+    for name in ("target", "vendor", "register", "unregister"):
         if getattr(options, name) == "":
             raise InstallerError(
                 f"--{name} requires a non-empty value",
                 exit_code=2,
             )
     if options.dry_run and not (
-        options.target is not None or options.all or options.self
+        options.target is not None
+        or options.vendor is not None
+        or options.all
+        or options.self
     ):
         raise InstallerError(
-            "--dry-run requires --target, --all, or --self",
+            "--dry-run requires --target, --vendor, --all, or --self",
             exit_code=2,
         )
-    if options.force and not (options.target is not None or options.all):
-        raise InstallerError("--force requires --target or --all", exit_code=2)
+    if options.force and not (
+        options.target is not None or options.vendor is not None or options.all
+    ):
+        raise InstallerError(
+            "--force requires --target, --vendor, or --all",
+            exit_code=2,
+        )
     if options.init_receipt:
         try:
             result = init_receipt()
@@ -2185,6 +3082,15 @@ def run(arguments: list[str] | None = None) -> int:
         )
         print(f"Result: {result}")
         return 0
+    if options.vendor is not None:
+        result = install_vendored_target(
+            source,
+            options.vendor,
+            dry_run=options.dry_run,
+            force=options.force,
+        )
+        print(f"Result: {result}")
+        return 0
     records = read_registry()
     if options.register is not None:
         project = canonical_target(options.register)
@@ -2194,6 +3100,10 @@ def run(arguments: list[str] | None = None) -> int:
             Path(project),
             allow_missing_config=True,
         )
+        if path_is_present(Path(project), PORTABLE_MANIFEST_PATH):
+            raise InstallerError(
+                "target is managed by a portable manifest; use --vendor"
+            )
         if project not in records:
             records.append(project)
             write_registry(records)
