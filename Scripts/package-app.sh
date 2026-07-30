@@ -9,6 +9,7 @@ PROJECT_FILE="$PROJECT_DIR/iPhoneLocationMove.xcodeproj"
 PROJECT_MARKER="$PROJECT_FILE/project.pbxproj"
 SCHEME_MARKER="$PROJECT_FILE/xcshareddata/xcschemes/iPhoneLocationMove.xcscheme"
 BUILD_DIR="$PROJECT_DIR/build"
+LOG_DIR="$BUILD_DIR/Logs"
 DERIVED_DATA_DIR="$BUILD_DIR/DerivedData"
 EXPORT_PATH="$BUILD_DIR/Export"
 APP_PATH="$EXPORT_PATH/iPhoneLocationMove.app"
@@ -43,6 +44,35 @@ print_warning() {
 
 print_error() {
     printf '[X] %s\n' "$1" >&2
+}
+
+run_logged_step() {
+    step_name="$1"
+    log_name="$2"
+    shift 2
+
+    log_path="$LOG_DIR/$log_name"
+    mkdir -p "$LOG_DIR"
+    print_step "$step_name"
+
+    if "$@" > "$log_path" 2>&1; then
+        print_success "$step_name"
+        return 0
+    else
+        status=$?
+    fi
+
+    relative_log="${log_path#"$PROJECT_DIR"/}"
+    print_error "${step_name}失敗；完整記錄：${relative_log}"
+    tail -n 40 "$log_path" >&2
+    return "$status"
+}
+
+run_python_protocol_tests() {
+    (
+        cd "$PROJECT_DIR"
+        python3 -m unittest discover -s iPhoneLocationMoveHelper/tests
+    )
 }
 
 show_help() {
@@ -165,9 +195,8 @@ fi
 trap cleanup EXIT
 
 if [ "$CLEAN_BUILD" = true ]; then
-    print_step "清理建置輸出"
     rm -rf "$BUILD_DIR"
-    xcodebuild clean \
+    run_logged_step "清理建置輸出" "xcode-clean.log" xcodebuild clean \
         -project "$PROJECT_FILE" \
         -scheme "$SCHEME_NAME" \
         -configuration Release
@@ -178,23 +207,20 @@ fi
 mkdir -p "$EXPORT_PATH"
 
 if [ "$SKIP_TESTS" = false ]; then
-    print_step "執行 macOS Xcode tests"
-    xcodebuild test \
+    run_logged_step "執行 macOS Xcode tests" "xcode-tests.log" xcodebuild test \
         -project "$PROJECT_FILE" \
         -scheme "$SCHEME_NAME" \
         -configuration Debug \
         -destination 'platform=macOS'
 
-    print_step "執行 Python protocol tests"
-    (
-        cd "$PROJECT_DIR"
-        python3 -m unittest discover -s iPhoneLocationMoveHelper/tests
-    )
+    run_logged_step \
+        "執行 Python protocol tests" \
+        "python-tests.log" \
+        run_python_protocol_tests
 else
     print_warning "跳過測試（Xcode 與 Python）"
 fi
 
-print_step "建置 Release App"
 BUILD_ARGUMENTS=(
     build
     -project "$PROJECT_FILE"
@@ -206,7 +232,10 @@ BUILD_ARGUMENTS=(
 if [ -n "$VERSION" ]; then
     BUILD_ARGUMENTS+=("MARKETING_VERSION=$VERSION")
 fi
-xcodebuild "${BUILD_ARGUMENTS[@]}"
+run_logged_step \
+    "建置 Release App" \
+    "xcode-build.log" \
+    xcodebuild "${BUILD_ARGUMENTS[@]}"
 
 if [ ! -d "$APP_PATH" ]; then
     print_error "Release build 未產生 App: $APP_PATH"

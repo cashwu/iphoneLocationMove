@@ -115,6 +115,16 @@ assert_file_absent() {
     fi
 }
 
+assert_file_contains() {
+    path="$1"
+    expected="$2"
+    if [ -f "$path" ] && grep -Fq -- "$expected" "$path"; then
+        record_pass
+    else
+        record_failure "file '$path' missing '$expected'"
+    fi
+}
+
 assert_no_temporary_directories() {
     leftovers="$(find "$FIXTURE_PROJECT/build" -maxdepth 1 -type d \( -name 'package-verify.*' -o -name 'dmg-staging.*' \) -print 2>/dev/null)"
     if [ -z "$leftovers" ]; then
@@ -142,6 +152,7 @@ write_shims() {
         'printf "xcodebuild" >> "$COMMAND_LOG"' \
         'for argument in "$@"; do printf " <%s>" "$argument" >> "$COMMAND_LOG"; done' \
         'printf "\n" >> "$COMMAND_LOG"' \
+        'printf "XCODEBUILD_VERBOSE_DETAIL action=%s\n" "${1:-unknown}"' \
         'action=""' \
         'export_path=""' \
         'version="1.0"' \
@@ -177,6 +188,7 @@ write_shims() {
         'printf "python3" >> "$COMMAND_LOG"' \
         'for argument in "$@"; do printf " <%s>" "$argument" >> "$COMMAND_LOG"; done' \
         'printf "\n" >> "$COMMAND_LOG"' \
+        'printf "PYTHON_VERBOSE_DETAIL\n" >&2' \
         'exit "${FAKE_PYTHON_STATUS:-0}"' \
         > "$shim_dir/python3"
 
@@ -411,6 +423,12 @@ test_default_pipeline() {
     assert_log_contains "otool <-X> <-s> <__TEXT> <__info_plist>"
     assert_log_contains "hdiutil <create>"
     assert_output_contains "打包完成"
+    assert_output_excludes "XCODEBUILD_VERBOSE_DETAIL"
+    assert_output_excludes "PYTHON_VERBOSE_DETAIL"
+    assert_file_contains "$FIXTURE_PROJECT/build/Logs/xcode-clean.log" "XCODEBUILD_VERBOSE_DETAIL"
+    assert_file_contains "$FIXTURE_PROJECT/build/Logs/xcode-tests.log" "XCODEBUILD_VERBOSE_DETAIL"
+    assert_file_contains "$FIXTURE_PROJECT/build/Logs/python-tests.log" "PYTHON_VERBOSE_DETAIL"
+    assert_file_contains "$FIXTURE_PROJECT/build/Logs/xcode-build.log" "XCODEBUILD_VERBOSE_DETAIL"
     assert_no_temporary_directories
 }
 
@@ -480,11 +498,15 @@ test_test_and_build_failures() {
     export FAKE_XCODE_TEST_STATUS=42
     run_package
     assert_failure_before_build
+    assert_output_contains "build/Logs/xcode-tests.log"
+    assert_output_contains "XCODEBUILD_VERBOSE_DETAIL"
 
     setup_case python_test_failure
     export FAKE_PYTHON_STATUS=43
     run_package
     assert_failure_before_build
+    assert_output_contains "build/Logs/python-tests.log"
+    assert_output_contains "PYTHON_VERBOSE_DETAIL"
 
     setup_case build_failure
     export FAKE_XCODE_BUILD_STATUS=44
