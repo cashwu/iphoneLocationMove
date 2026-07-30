@@ -24,6 +24,117 @@ final class LocationMapModelTests: XCTestCase {
         XCTAssertNil(model.routePreview)
     }
 
+    func testPreviewCameraIntentFollowsSearchAndMapSelectionOwnership() throws {
+        let model = LocationMapModel()
+        let place = searchPlace(
+            latitude: 25.033_968,
+            longitude: 121.564_468,
+            address: "台北 101"
+        )
+        let request = try model.beginSearch(query: "Taipei 101")
+        XCTAssertEqual(model.receiveSearchResults([place], for: request), .applied)
+
+        try model.selectSearchResult(place, from: request)
+
+        let searchIntent = try XCTUnwrap(model.previewCameraIntent)
+        XCTAssertEqual(searchIntent.coordinate, place.coordinate)
+        XCTAssertEqual(searchIntent.identity, model.mapSearchGeneration)
+
+        try model.selectMapCoordinate(
+            coordinate(latitude: 25.04, longitude: 121.53)
+        )
+
+        XCTAssertNil(model.previewCameraIntent)
+    }
+
+    func testPreviewCameraIntentClearsWithPreviewOwnershipAndSurvivesFailures() throws {
+        let model = LocationMapModel()
+        let place = searchPlace(
+            latitude: 25.033_968,
+            longitude: 121.564_468,
+            address: "台北 101"
+        )
+        let request = try model.beginSearch(query: "Taipei 101")
+        XCTAssertEqual(model.receiveSearchResults([place], for: request), .applied)
+        try model.selectSearchResult(place, from: request)
+        let selectedIntent = try XCTUnwrap(model.previewCameraIntent)
+
+        XCTAssertThrowsError(
+            try model.selectSearchResult(place, from: request)
+        )
+        XCTAssertThrowsError(try model.beginSearch(query: "   "))
+        XCTAssertEqual(model.previewCameraIntent, selectedIntent)
+
+        _ = try model.beginSearch(query: "新搜尋")
+        XCTAssertNil(model.previewCameraIntent)
+
+        let secondRequest = try model.beginSearch(query: "再次搜尋")
+        XCTAssertEqual(
+            model.receiveSearchResults([place], for: secondRequest),
+            .applied
+        )
+        try model.selectSearchResult(place, from: secondRequest)
+        XCTAssertNotNil(model.previewCameraIntent)
+
+        try model.clearSearch()
+        XCTAssertNil(model.previewCameraIntent)
+
+        let thirdRequest = try model.beginSearch(query: "重置前搜尋")
+        XCTAssertEqual(
+            model.receiveSearchResults([place], for: thirdRequest),
+            .applied
+        )
+        try model.selectSearchResult(place, from: thirdRequest)
+        XCTAssertNotNil(model.previewCameraIntent)
+
+        try model.resetWorkspace()
+        XCTAssertNil(model.previewCameraIntent)
+    }
+
+    func testPreviewAddressUpdateDoesNotCreateCameraIntent() throws {
+        let model = LocationMapModel()
+        let request = try model.selectMapCoordinate(
+            coordinate(latitude: 25.04, longitude: 121.53)
+        )
+
+        XCTAssertEqual(
+            model.receivePreviewAddress("點擊地址", for: request),
+            .applied
+        )
+
+        XCTAssertEqual(model.preview?.address, "點擊地址")
+        XCTAssertNil(model.previewCameraIntent)
+    }
+
+    func testStalePreviewAddressPreservesSearchCameraIntent() throws {
+        let model = LocationMapModel()
+        let staleAddressRequest = try model.selectMapCoordinate(
+            coordinate(latitude: 25.04, longitude: 121.53)
+        )
+        let place = searchPlace(
+            latitude: 25.033_968,
+            longitude: 121.564_468,
+            address: "台北 101"
+        )
+        let searchRequest = try model.beginSearch(query: "Taipei 101")
+        XCTAssertEqual(
+            model.receiveSearchResults([place], for: searchRequest),
+            .applied
+        )
+        try model.selectSearchResult(place, from: searchRequest)
+        let searchIntent = try XCTUnwrap(model.previewCameraIntent)
+
+        XCTAssertEqual(
+            model.receivePreviewAddress(
+                "晚到地址",
+                for: staleAddressRequest
+            ),
+            .stale
+        )
+        XCTAssertEqual(model.preview, place)
+        XCTAssertEqual(model.previewCameraIntent, searchIntent)
+    }
+
     func testOlderSearchResponseCannotReplaceNewerQueryResults() throws {
         let model = LocationMapModel()
         let oldRequest = try model.beginSearch(query: "舊查詢")
@@ -601,6 +712,357 @@ final class LocationMapModelTests: XCTestCase {
         XCTAssertEqual(applicationCount, 2)
     }
 
+    func testMapClickAndLateSearchResponsePreserveVisibleRegion() throws {
+        let mapView = CameraOperationSpyMapView()
+        let coordinator = LocationMapCanvas.Coordinator(
+            onCoordinateSelected: { _ in },
+            onManualCameraInteraction: {}
+        )
+        coordinator.mapView = mapView
+        let initialRegion = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: 25.04, longitude: 121.53),
+            latitudinalMeters: 200,
+            longitudinalMeters: 200
+        )
+        mapView.establishRegion(initialRegion)
+        let baselineCounts = mapView.cameraOperationCounts
+        let baselineRegion = mapView.region
+
+        let model = LocationMapModel()
+        let staleRequest = try model.beginSearch(query: "尚未完成")
+        let clicked = coordinate(latitude: 25.040_2, longitude: 121.530_2)
+        let addressRequest = try model.selectMapCoordinate(clicked)
+
+        coordinator.update(
+            preview: model.preview,
+            previewCameraIntent: model.previewCameraIntent,
+            endpointA: nil,
+            endpointB: nil,
+            route: nil,
+            routeCameraIdentity: nil,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: nil
+        )
+        XCTAssertEqual(mapView.cameraOperationCounts, baselineCounts)
+        assertRegion(mapView.region, equals: baselineRegion)
+
+        XCTAssertEqual(
+            model.receivePreviewAddress("點擊地址", for: addressRequest),
+            .applied
+        )
+        coordinator.update(
+            preview: model.preview,
+            previewCameraIntent: model.previewCameraIntent,
+            endpointA: nil,
+            endpointB: nil,
+            route: nil,
+            routeCameraIdentity: nil,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: nil
+        )
+
+        XCTAssertEqual(
+            model.receiveSearchResults(
+                [searchPlace(latitude: 22, longitude: 120, address: "舊結果")],
+                for: staleRequest
+            ),
+            .stale
+        )
+        coordinator.update(
+            preview: model.preview,
+            previewCameraIntent: model.previewCameraIntent,
+            endpointA: nil,
+            endpointB: nil,
+            route: nil,
+            routeCameraIdentity: nil,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: nil
+        )
+
+        let secondClicked = coordinate(
+            latitude: 25.040_4,
+            longitude: 121.530_4
+        )
+        try model.selectMapCoordinate(secondClicked)
+        coordinator.update(
+            preview: model.preview,
+            previewCameraIntent: model.previewCameraIntent,
+            endpointA: nil,
+            endpointB: nil,
+            route: nil,
+            routeCameraIdentity: nil,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: nil
+        )
+
+        XCTAssertEqual(mapView.cameraOperationCounts, baselineCounts)
+        assertRegion(mapView.region, equals: baselineRegion)
+        XCTAssertEqual(
+            try annotation(titled: "預覽", in: mapView).coordinate.latitude,
+            secondClicked.latitude,
+            accuracy: 0.000_001
+        )
+    }
+
+    func testSearchPreviewCentersOnceAndRedrawDoesNotReplay() throws {
+        let model = LocationMapModel()
+        let place = searchPlace(
+            latitude: 25.033_968,
+            longitude: 121.564_468,
+            address: "台北 101"
+        )
+        let request = try model.beginSearch(query: "Taipei 101")
+        XCTAssertEqual(model.receiveSearchResults([place], for: request), .applied)
+        try model.selectSearchResult(place, from: request)
+
+        let mapView = CameraOperationSpyMapView()
+        let coordinator = LocationMapCanvas.Coordinator(
+            onCoordinateSelected: { _ in },
+            onManualCameraInteraction: {}
+        )
+        coordinator.mapView = mapView
+
+        coordinator.update(
+            preview: model.preview,
+            previewCameraIntent: nil,
+            endpointA: nil,
+            endpointB: nil,
+            route: nil,
+            routeCameraIdentity: nil,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: nil
+        )
+        let baselineCounts = mapView.cameraOperationCounts
+        coordinator.update(
+            preview: model.preview,
+            previewCameraIntent: model.previewCameraIntent,
+            endpointA: nil,
+            endpointB: nil,
+            route: nil,
+            routeCameraIdentity: nil,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: nil
+        )
+        let countsAfterCenter = mapView.cameraOperationCounts
+        coordinator.update(
+            preview: model.preview,
+            previewCameraIntent: model.previewCameraIntent,
+            endpointA: nil,
+            endpointB: nil,
+            route: nil,
+            routeCameraIdentity: nil,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: coordinate(
+                latitude: 25.04,
+                longitude: 121.57
+            )
+        )
+
+        XCTAssertEqual(
+            countsAfterCenter.setRegion,
+            baselineCounts.setRegion + 1
+        )
+        XCTAssertEqual(countsAfterCenter.setCenter, baselineCounts.setCenter)
+        XCTAssertEqual(
+            countsAfterCenter.setVisibleMapRect,
+            baselineCounts.setVisibleMapRect
+        )
+        XCTAssertEqual(mapView.cameraOperationCounts, countsAfterCenter)
+    }
+
+    func testReturningToSameSearchCoordinateUsesNewCameraIdentity() throws {
+        let model = LocationMapModel()
+        let placeA = searchPlace(
+            latitude: 25.033_968,
+            longitude: 121.564_468,
+            address: "位置 A"
+        )
+        let firstRequest = try model.beginSearch(query: "位置 A")
+        XCTAssertEqual(
+            model.receiveSearchResults([placeA], for: firstRequest),
+            .applied
+        )
+        try model.selectSearchResult(placeA, from: firstRequest)
+        let firstIntent = try XCTUnwrap(model.previewCameraIntent)
+
+        let mapView = CameraOperationSpyMapView()
+        let coordinator = LocationMapCanvas.Coordinator(
+            onCoordinateSelected: { _ in },
+            onManualCameraInteraction: {}
+        )
+        coordinator.mapView = mapView
+        coordinator.update(
+            preview: model.preview,
+            previewCameraIntent: nil,
+            endpointA: nil,
+            endpointB: nil,
+            route: nil,
+            routeCameraIdentity: nil,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: nil
+        )
+        let baselineCounts = mapView.cameraOperationCounts
+        coordinator.update(
+            preview: model.preview,
+            previewCameraIntent: firstIntent,
+            endpointA: nil,
+            endpointB: nil,
+            route: nil,
+            routeCameraIdentity: nil,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: nil
+        )
+
+        try model.selectMapCoordinate(
+            coordinate(latitude: 25.04, longitude: 121.53)
+        )
+        coordinator.update(
+            preview: model.preview,
+            previewCameraIntent: model.previewCameraIntent,
+            endpointA: nil,
+            endpointB: nil,
+            route: nil,
+            routeCameraIdentity: nil,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: nil
+        )
+
+        let secondRequest = try model.beginSearch(query: "位置 A")
+        XCTAssertEqual(
+            model.receiveSearchResults([placeA], for: secondRequest),
+            .applied
+        )
+        try model.selectSearchResult(placeA, from: secondRequest)
+        let secondIntent = try XCTUnwrap(model.previewCameraIntent)
+        coordinator.update(
+            preview: model.preview,
+            previewCameraIntent: secondIntent,
+            endpointA: nil,
+            endpointB: nil,
+            route: nil,
+            routeCameraIdentity: nil,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: nil
+        )
+
+        XCTAssertNotEqual(firstIntent.identity, secondIntent.identity)
+        XCTAssertEqual(
+            mapView.cameraOperationCounts.setRegion,
+            baselineCounts.setRegion + 2
+        )
+    }
+
+    func testRouteFitConsumesSameRenderPreviewButNotLaterSearchIntent() throws {
+        let mapView = CameraOperationSpyMapView()
+        let coordinator = LocationMapCanvas.Coordinator(
+            onCoordinateSelected: { _ in },
+            onManualCameraInteraction: {}
+        )
+        coordinator.mapView = mapView
+        let preview = searchPlace(
+            latitude: 25.033_968,
+            longitude: 121.564_468,
+            address: "搜尋結果"
+        )
+        let route = polyline()
+        let routeIdentity = RouteRequestGeneration(rawValue: 1)
+        let sameRenderIntent = MapPreviewCameraIntent(
+            coordinate: preview.coordinate,
+            identity: MapSearchGeneration(rawValue: 1)
+        )
+
+        coordinator.update(
+            preview: preview,
+            previewCameraIntent: nil,
+            endpointA: nil,
+            endpointB: nil,
+            route: route,
+            routeCameraIdentity: nil,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: nil
+        )
+        let baselineCounts = mapView.cameraOperationCounts
+        coordinator.update(
+            preview: preview,
+            previewCameraIntent: sameRenderIntent,
+            endpointA: nil,
+            endpointB: nil,
+            route: route,
+            routeCameraIdentity: routeIdentity,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: nil
+        )
+        coordinator.update(
+            preview: preview,
+            previewCameraIntent: sameRenderIntent,
+            endpointA: nil,
+            endpointB: nil,
+            route: route,
+            routeCameraIdentity: routeIdentity,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: coordinate(
+                latitude: 25.04,
+                longitude: 121.57
+            )
+        )
+
+        XCTAssertEqual(
+            mapView.cameraOperationCounts.setVisibleMapRect,
+            baselineCounts.setVisibleMapRect + 1
+        )
+        XCTAssertEqual(
+            mapView.cameraOperationCounts.setRegion,
+            baselineCounts.setRegion
+        )
+        XCTAssertEqual(
+            mapView.cameraOperationCounts.setCenter,
+            baselineCounts.setCenter
+        )
+
+        let laterIntent = MapPreviewCameraIntent(
+            coordinate: preview.coordinate,
+            identity: MapSearchGeneration(rawValue: 2)
+        )
+        coordinator.update(
+            preview: preview,
+            previewCameraIntent: laterIntent,
+            endpointA: nil,
+            endpointB: nil,
+            route: route,
+            routeCameraIdentity: routeIdentity,
+            macLocation: nil,
+            macInitialCenterIntent: nil,
+            confirmedRouteMarkerCoordinate: nil
+        )
+
+        XCTAssertEqual(
+            mapView.cameraOperationCounts.setVisibleMapRect,
+            baselineCounts.setVisibleMapRect + 1
+        )
+        XCTAssertEqual(
+            mapView.cameraOperationCounts.setRegion,
+            baselineCounts.setRegion + 1
+        )
+        XCTAssertEqual(
+            mapView.cameraOperationCounts.setCenter,
+            baselineCounts.setCenter
+        )
+    }
+
     func testCameraEffectsApplyEachMacRecenterIdentityOnce() {
         let effects = LocationMapCameraEffects()
         let first = MacRecenterGeneration(rawValue: 1)
@@ -648,7 +1110,10 @@ final class LocationMapModelTests: XCTestCase {
         var manualInteractionCount = 0
 
         effects.applyPreview(
-            coordinate(latitude: 25.05, longitude: 121.55)
+            MapPreviewCameraIntent(
+                coordinate: coordinate(latitude: 25.05, longitude: 121.55),
+                identity: MapSearchGeneration(rawValue: 1)
+            )
         ) {
             effects.regionWillChange(
                 hasActiveGesture: true,
@@ -721,6 +1186,7 @@ final class LocationMapModelTests: XCTestCase {
 
         coordinator.update(
             preview: preview,
+            previewCameraIntent: nil,
             endpointA: endpointA,
             endpointB: endpointB,
             route: route,
@@ -743,6 +1209,7 @@ final class LocationMapModelTests: XCTestCase {
 
         coordinator.update(
             preview: preview,
+            previewCameraIntent: nil,
             endpointA: endpointA,
             endpointB: endpointB,
             route: route,
@@ -788,6 +1255,7 @@ final class LocationMapModelTests: XCTestCase {
 
         coordinator.update(
             preview: preview,
+            previewCameraIntent: nil,
             endpointA: endpointA,
             endpointB: endpointB,
             route: route,
@@ -834,9 +1302,14 @@ final class LocationMapModelTests: XCTestCase {
             longitude: 121.562,
             address: "預覽地址"
         )
+        let previewCameraIntent = MapPreviewCameraIntent(
+            coordinate: preview.coordinate,
+            identity: MapSearchGeneration(rawValue: 1)
+        )
 
         coordinator.update(
             preview: preview,
+            previewCameraIntent: previewCameraIntent,
             endpointA: nil,
             endpointB: nil,
             route: nil,
@@ -849,10 +1322,14 @@ final class LocationMapModelTests: XCTestCase {
             )
         )
         let cameraCountsAfterInitialRender = mapView.cameraOperationCounts
+        XCTAssertGreaterThan(cameraCountsAfterInitialRender.setRegion, 0)
+        XCTAssertEqual(cameraCountsAfterInitialRender.setCenter, 0)
+        XCTAssertEqual(cameraCountsAfterInitialRender.setVisibleMapRect, 0)
 
         for offset in 1 ... 3 {
             coordinator.update(
                 preview: preview,
+                previewCameraIntent: previewCameraIntent,
                 endpointA: nil,
                 endpointB: nil,
                 route: nil,
@@ -888,6 +1365,7 @@ final class LocationMapModelTests: XCTestCase {
 
         coordinator.update(
             preview: nil,
+            previewCameraIntent: nil,
             endpointA: nil,
             endpointB: nil,
             route: nil,
@@ -904,6 +1382,7 @@ final class LocationMapModelTests: XCTestCase {
         for offset in 1 ... 3 {
             coordinator.update(
                 preview: nil,
+                previewCameraIntent: nil,
                 endpointA: nil,
                 endpointB: nil,
                 route: nil,
@@ -936,6 +1415,7 @@ final class LocationMapModelTests: XCTestCase {
 
         coordinator.update(
             preview: nil,
+            previewCameraIntent: nil,
             endpointA: endpointA,
             endpointB: nil,
             route: nil,
@@ -963,6 +1443,7 @@ final class LocationMapModelTests: XCTestCase {
 
         coordinator.update(
             preview: nil,
+            previewCameraIntent: nil,
             endpointA: MapSearchPlace(
                 coordinate: sharedCoordinate,
                 address: "起點"
@@ -1001,6 +1482,42 @@ final class LocationMapModelTests: XCTestCase {
             mapView.annotations.first {
                 $0.title == title
             }
+        )
+    }
+
+    private func assertRegion(
+        _ actual: MKCoordinateRegion,
+        equals expected: MKCoordinateRegion,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(
+            actual.center.latitude,
+            expected.center.latitude,
+            accuracy: 0.000_001,
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            actual.center.longitude,
+            expected.center.longitude,
+            accuracy: 0.000_001,
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            actual.span.latitudeDelta,
+            expected.span.latitudeDelta,
+            accuracy: 0.000_001,
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            actual.span.longitudeDelta,
+            expected.span.longitudeDelta,
+            accuracy: 0.000_001,
+            file: file,
+            line: line
         )
     }
 
@@ -1053,12 +1570,23 @@ private final class CameraOperationSpyMapView: MKMapView {
     }
 
     struct Counts: Equatable {
-        var routeFit = 0
-        var center = 0
+        var setRegion = 0
+        var setCenter = 0
+        var setVisibleMapRect = 0
     }
 
     private(set) var cameraOperationCounts = Counts()
     private(set) var addedAnnotationStates: [AddedAnnotationState] = []
+    private var isEstablishingRegion = false
+
+    // Camera overrides intentionally do not call super during assertions.
+    // Counts are the primary oracle; region checks only catch untracked paths.
+
+    func establishRegion(_ region: MKCoordinateRegion) {
+        isEstablishingRegion = true
+        super.setRegion(region, animated: false)
+        isEstablishingRegion = false
+    }
 
     override func addAnnotation(_ annotation: MKAnnotation) {
         addedAnnotationStates.append(
@@ -1076,19 +1604,36 @@ private final class CameraOperationSpyMapView: MKMapView {
         edgePadding insets: NSEdgeInsets,
         animated animate: Bool
     ) {
-        cameraOperationCounts.routeFit += 1
-        super.setVisibleMapRect(
-            mapRect,
-            edgePadding: insets,
-            animated: animate
-        )
+        if isEstablishingRegion {
+            super.setVisibleMapRect(
+                mapRect,
+                edgePadding: insets,
+                animated: animate
+            )
+            return
+        }
+        cameraOperationCounts.setVisibleMapRect += 1
     }
 
     override func setRegion(
         _ region: MKCoordinateRegion,
         animated animate: Bool
     ) {
-        cameraOperationCounts.center += 1
-        super.setRegion(region, animated: animate)
+        if isEstablishingRegion {
+            super.setRegion(region, animated: animate)
+            return
+        }
+        cameraOperationCounts.setRegion += 1
+    }
+
+    override func setCenter(
+        _ coordinate: CLLocationCoordinate2D,
+        animated: Bool
+    ) {
+        if isEstablishingRegion {
+            super.setCenter(coordinate, animated: animated)
+            return
+        }
+        cameraOperationCounts.setCenter += 1
     }
 }

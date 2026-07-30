@@ -86,6 +86,11 @@ struct MapPreviewAddressRequest: Equatable, Sendable {
     let coordinate: MapCoordinate
 }
 
+struct MapPreviewCameraIntent: Equatable, Sendable {
+    let coordinate: MapCoordinate
+    let identity: MapSearchGeneration
+}
+
 enum MapSearchApplication: Equatable, Sendable {
     case applied
     case stale
@@ -210,6 +215,7 @@ final class LocationMapModel: ObservableObject {
     static let walkingSpeedRange = 1.0 ... 7.0
 
     @Published private(set) var preview: MapSearchPlace?
+    @Published private(set) var previewCameraIntent: MapPreviewCameraIntent?
     @Published private(set) var searchResults: [MapSearchPlace] = []
     @Published private(set) var endpointA: MapSearchPlace?
     @Published private(set) var endpointB: MapSearchPlace?
@@ -284,6 +290,7 @@ final class LocationMapModel: ObservableObject {
         recordUserMapContext()
         try advanceSearchOwnership()
         preview = nil
+        previewCameraIntent = nil
         searchResults = []
         let request = MapSearchRequest(
             generation: mapSearchGeneration,
@@ -319,6 +326,10 @@ final class LocationMapModel: ObservableObject {
         }
         try advanceSearchOwnership()
         preview = place
+        previewCameraIntent = MapPreviewCameraIntent(
+            coordinate: place.coordinate,
+            identity: mapSearchGeneration
+        )
         activeSearchRequest = nil
     }
 
@@ -329,6 +340,7 @@ final class LocationMapModel: ObservableObject {
         recordUserMapContext()
         try advanceSearchOwnership()
         preview = MapSearchPlace(coordinate: coordinate, address: nil)
+        previewCameraIntent = nil
         searchResults = []
         activeSearchRequest = nil
         return MapPreviewAddressRequest(
@@ -358,6 +370,7 @@ final class LocationMapModel: ObservableObject {
         recordUserMapContext()
         try advanceSearchOwnership()
         preview = nil
+        previewCameraIntent = nil
         searchResults = []
         activeSearchRequest = nil
     }
@@ -535,6 +548,7 @@ final class LocationMapModel: ObservableObject {
         activeSearchRequest = nil
         activeDirectionsRequest = nil
         preview = nil
+        previewCameraIntent = nil
         searchResults = []
         endpointA = nil
         endpointB = nil

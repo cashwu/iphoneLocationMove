@@ -85,6 +85,7 @@ struct LocationMapView: View {
             ObservedSimulationMapCanvas(
                 simulationStore: simulationStore,
                 preview: model.preview,
+                previewCameraIntent: model.previewCameraIntent,
                 endpointA: model.endpointA,
                 endpointB: model.endpointB,
                 route: model.routePreview?.polyline,
@@ -98,6 +99,7 @@ struct LocationMapView: View {
         } else {
             LocationMapCanvas(
                 preview: model.preview,
+                previewCameraIntent: model.previewCameraIntent,
                 endpointA: model.endpointA,
                 endpointB: model.endpointB,
                 route: model.routePreview?.polyline,
@@ -1347,32 +1349,40 @@ private struct TestingActionMarker: NSViewRepresentable {
 
 @MainActor
 final class LocationMapCameraEffects {
-    private var appliedPreviewCoordinate: MapCoordinate?
+    private var appliedPreviewIdentity: MapSearchGeneration?
     private var appliedRouteCameraIdentity: RouteRequestGeneration?
     private var appliedMacCenterGeneration: DeviceSessionGeneration?
     private var appliedMacRecenterGeneration: MacRecenterGeneration?
     private var isApplyingProgrammaticCamera = false
 
+    @discardableResult
     func applyPreview(
-        _ coordinate: MapCoordinate,
+        _ intent: MapPreviewCameraIntent,
         update: () -> Void
-    ) {
-        guard coordinate != appliedPreviewCoordinate else {
-            return
+    ) -> Bool {
+        guard intent.identity != appliedPreviewIdentity else {
+            return false
         }
-        appliedPreviewCoordinate = coordinate
+        appliedPreviewIdentity = intent.identity
         applyProgrammatic(update)
+        return true
     }
 
+    func consumePreview(_ identity: MapSearchGeneration) {
+        appliedPreviewIdentity = identity
+    }
+
+    @discardableResult
     func applyRoute(
         _ identity: RouteRequestGeneration,
         update: () -> Void
-    ) {
+    ) -> Bool {
         guard identity != appliedRouteCameraIdentity else {
-            return
+            return false
         }
         appliedRouteCameraIdentity = identity
         applyProgrammatic(update)
+        return true
     }
 
     func applyMacCenter(
@@ -1419,6 +1429,7 @@ final class LocationMapCameraEffects {
 private struct ObservedSimulationMapCanvas: View {
     @ObservedObject var simulationStore: SimulationStore
     let preview: MapSearchPlace?
+    let previewCameraIntent: MapPreviewCameraIntent?
     let endpointA: MapSearchPlace?
     let endpointB: MapSearchPlace?
     let route: [MapCoordinate]?
@@ -1432,6 +1443,7 @@ private struct ObservedSimulationMapCanvas: View {
     var body: some View {
         LocationMapCanvas(
             preview: preview,
+            previewCameraIntent: previewCameraIntent,
             endpointA: endpointA,
             endpointB: endpointB,
             route: route,
@@ -1462,6 +1474,7 @@ private struct ObservedSimulationMapCanvas: View {
 
 struct LocationMapCanvas: NSViewRepresentable {
     let preview: MapSearchPlace?
+    let previewCameraIntent: MapPreviewCameraIntent?
     let endpointA: MapSearchPlace?
     let endpointB: MapSearchPlace?
     let route: [MapCoordinate]?
@@ -1475,6 +1488,7 @@ struct LocationMapCanvas: NSViewRepresentable {
 
     init(
         preview: MapSearchPlace?,
+        previewCameraIntent: MapPreviewCameraIntent?,
         endpointA: MapSearchPlace?,
         endpointB: MapSearchPlace?,
         route: [MapCoordinate]?,
@@ -1487,6 +1501,7 @@ struct LocationMapCanvas: NSViewRepresentable {
         onManualCameraInteraction: @escaping () -> Void
     ) {
         self.preview = preview
+        self.previewCameraIntent = previewCameraIntent
         self.endpointA = endpointA
         self.endpointB = endpointB
         self.route = route
@@ -1524,6 +1539,7 @@ struct LocationMapCanvas: NSViewRepresentable {
             onManualCameraInteraction
         context.coordinator.update(
             preview: preview,
+            previewCameraIntent: previewCameraIntent,
             endpointA: endpointA,
             endpointB: endpointB,
             route: route,
@@ -1581,6 +1597,7 @@ struct LocationMapCanvas: NSViewRepresentable {
 
         func update(
             preview: MapSearchPlace?,
+            previewCameraIntent: MapPreviewCameraIntent?,
             endpointA: MapSearchPlace?,
             endpointB: MapSearchPlace?,
             route: [MapCoordinate]?,
@@ -1623,27 +1640,44 @@ struct LocationMapCanvas: NSViewRepresentable {
             )
             syncRoute(route)
 
-            if let routeOverlay {
-                if let routeCameraIdentity {
-                    cameraEffects.applyRoute(routeCameraIdentity) {
-                        mapView.setVisibleMapRect(
-                            routeOverlay.boundingMapRect,
-                            edgePadding: NSEdgeInsets(
-                                top: 40,
-                                left: 40,
-                                bottom: 40,
-                                right: 40
-                            ),
-                            animated: true
-                        )
-                    }
+            let didApplyRoute: Bool
+            if let routeOverlay, let routeCameraIdentity {
+                didApplyRoute = cameraEffects.applyRoute(routeCameraIdentity) {
+                    mapView.setVisibleMapRect(
+                        routeOverlay.boundingMapRect,
+                        edgePadding: NSEdgeInsets(
+                            top: 40,
+                            left: 40,
+                            bottom: 40,
+                            right: 40
+                        ),
+                        animated: true
+                    )
                 }
-            } else if let preview {
-                cameraEffects.applyPreview(preview.coordinate) {
-                    centerMap(on: preview.coordinate)
+            } else {
+                didApplyRoute = false
+            }
+
+            let didApplyPreview: Bool
+            if didApplyRoute {
+                if let previewCameraIntent {
+                    cameraEffects.consumePreview(previewCameraIntent.identity)
                 }
-            } else if preview == nil,
-                      let macInitialCenterIntent
+                didApplyPreview = false
+            } else if let previewCameraIntent {
+                didApplyPreview = cameraEffects.applyPreview(
+                    previewCameraIntent
+                ) {
+                    centerMap(on: previewCameraIntent.coordinate)
+                }
+            } else {
+                didApplyPreview = false
+            }
+
+            if !didApplyRoute,
+               !didApplyPreview,
+               preview == nil,
+               let macInitialCenterIntent
             {
                 cameraEffects.applyMacCenter(
                     macInitialCenterIntent.generation
