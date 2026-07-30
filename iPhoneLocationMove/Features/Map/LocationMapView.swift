@@ -19,10 +19,37 @@ struct ResetConfirmationContent: Equatable {
     }
 }
 
+private struct ResetConfirmationDialogModifier: ViewModifier {
+    let isEnabled: Bool
+    let confirmation: ResetConfirmationContent
+    @Binding var isPresented: Bool
+    let performReset: () -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.confirmationDialog(
+                confirmation.title,
+                isPresented: $isPresented,
+                titleVisibility: .visible
+            ) {
+                Button("重置", role: .destructive, action: performReset)
+                    .accessibilityIdentifier("workspace-reset-confirm")
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text(confirmation.message)
+            }
+        } else {
+            content
+        }
+    }
+}
+
 struct LocationMapView: View {
     @StateObject private var model: LocationMapModel
     @ObservedObject private var macLocationCoordinator: MacLocationCoordinator
     private let simulationStore: SimulationStore?
+    private let presentsResetConfirmationDialog: Bool
     @State private var query = ""
     @State private var searchRequest: MapSearchRequest?
     @State private var activeSearch: MKLocalSearch?
@@ -40,13 +67,15 @@ struct LocationMapView: View {
         macLocationCoordinator: MacLocationCoordinator = MacLocationCoordinator(),
         model: LocationMapModel = LocationMapModel(),
         initialQuery: String = "",
-        initialRoundTrip: Bool = false
+        initialRoundTrip: Bool = false,
+        presentsResetConfirmationDialog: Bool = true
     ) {
         _model = StateObject(wrappedValue: model)
         _query = State(initialValue: initialQuery)
         _roundTrip = State(initialValue: initialRoundTrip)
         self.simulationStore = simulationStore
         self.macLocationCoordinator = macLocationCoordinator
+        self.presentsResetConfirmationDialog = presentsResetConfirmationDialog
     }
 
     var body: some View {
@@ -64,19 +93,14 @@ struct LocationMapView: View {
         ) { _ in
             synchronizeMacLocation()
         }
-        .confirmationDialog(
-            resetConfirmationContent.title,
-            isPresented: $isResetConfirmationPresented,
-            titleVisibility: .visible
-        ) {
-            Button("重置", role: .destructive) {
-                performReset()
-            }
-            .accessibilityIdentifier("workspace-reset-confirm")
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text(resetConfirmationContent.message)
-        }
+        .modifier(
+            ResetConfirmationDialogModifier(
+                isEnabled: presentsResetConfirmationDialog,
+                confirmation: resetConfirmationContent,
+                isPresented: $isResetConfirmationPresented,
+                performReset: performReset
+            )
+        )
     }
 
     @ViewBuilder

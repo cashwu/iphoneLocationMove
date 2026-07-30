@@ -194,6 +194,26 @@ final class ContentViewTests: XCTestCase {
         XCTAssertEqual(model.routeStatus, .idle)
     }
 
+    func testResetTestingSeamDoesNotPresentAppKitSheet() async throws {
+        let (hostingView, window) = makeMapHostingView()
+        defer { removeFromWindow(window) }
+
+        let reset = try XCTUnwrap(
+            findButton(in: hostingView, identifier: "workspace-reset-button")
+        )
+        reset.performClick(nil)
+        await waitForViewUpdate(hostingView)
+
+        XCTAssertNil(window.attachedSheet)
+        let confirm = try XCTUnwrap(
+            findButton(
+                in: hostingView,
+                identifier: "workspace-reset-confirmation-action"
+            )
+        )
+        XCTAssertTrue(confirm.isEnabled)
+    }
+
     func testResetIsDisabledForEveryBusySimulationState() async throws {
         let startingDevice = ResetTestSimulationDevice()
         await startingDevice.suspendNextSet()
@@ -465,7 +485,8 @@ final class ContentViewTests: XCTestCase {
                 ),
                 model: model,
                 initialQuery: initialQuery,
-                initialRoundTrip: initialRoundTrip
+                initialRoundTrip: initialRoundTrip,
+                presentsResetConfirmationDialog: false
             )
         )
         let window = NSWindow(
