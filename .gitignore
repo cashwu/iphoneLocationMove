@@ -2,3 +2,5 @@
 .cash-skills/state/
 __pycache__/
 /build/
+**/xcuserdata/
+*.xcuserstate
