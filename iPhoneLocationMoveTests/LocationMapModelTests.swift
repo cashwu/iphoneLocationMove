@@ -4,6 +4,94 @@ import XCTest
 
 @MainActor
 final class LocationMapModelTests: XCTestCase {
+    func testDisplayedSearchResultsCanBeSelectedInSequence() throws {
+        let model = LocationMapModel()
+        let request = try model.beginSearch(query: "大坑")
+        let placeA = searchPlace(
+            latitude: 23.959_731,
+            longitude: 120.738_768,
+            address: "大坑"
+        )
+        let placeB = searchPlace(
+            latitude: 24.184_092,
+            longitude: 120.741_168,
+            address: "大坑里"
+        )
+        XCTAssertEqual(
+            model.receiveSearchResults([placeA, placeB], for: request),
+            .applied
+        )
+
+        try model.selectSearchResult(placeA)
+        let firstIntent = try XCTUnwrap(model.previewCameraIntent)
+        try model.selectSearchResult(placeB)
+        let secondIntent = try XCTUnwrap(model.previewCameraIntent)
+
+        XCTAssertNotEqual(firstIntent.identity, secondIntent.identity)
+        XCTAssertEqual(model.preview, placeB)
+        XCTAssertEqual(secondIntent.coordinate, placeB.coordinate)
+        XCTAssertEqual(secondIntent.identity, model.mapSearchGeneration)
+        XCTAssertEqual(model.searchResults, [placeA, placeB])
+    }
+
+    func testSelectingSameDisplayedSearchResultAgainAdvancesCameraIntent() throws {
+        let model = LocationMapModel()
+        let request = try model.beginSearch(query: "大坑")
+        let place = searchPlace(
+            latitude: 23.959_731,
+            longitude: 120.738_768,
+            address: "大坑"
+        )
+        XCTAssertEqual(
+            model.receiveSearchResults([place], for: request),
+            .applied
+        )
+
+        try model.selectSearchResult(place)
+        let firstGeneration = model.mapSearchGeneration
+        let firstIntent = try XCTUnwrap(model.previewCameraIntent)
+        try model.selectSearchResult(place)
+        let secondIntent = try XCTUnwrap(model.previewCameraIntent)
+
+        XCTAssertGreaterThan(model.mapSearchGeneration, firstGeneration)
+        XCTAssertNotEqual(secondIntent.identity, firstIntent.identity)
+        XCTAssertEqual(secondIntent.identity, model.mapSearchGeneration)
+        XCTAssertEqual(model.preview, place)
+    }
+
+    func testSearchResultOutsideCurrentResultsIsRejectedWithoutChangingState() throws {
+        let model = LocationMapModel()
+        let request = try model.beginSearch(query: "大坑")
+        let currentPlace = searchPlace(
+            latitude: 23.959_731,
+            longitude: 120.738_768,
+            address: "大坑"
+        )
+        let stalePlace = searchPlace(
+            latitude: 24.184_092,
+            longitude: 120.741_168,
+            address: "舊結果"
+        )
+        XCTAssertEqual(
+            model.receiveSearchResults([currentPlace], for: request),
+            .applied
+        )
+        try model.selectSearchResult(currentPlace)
+        let preview = model.preview
+        let generation = model.mapSearchGeneration
+        let intent = model.previewCameraIntent
+        let results = model.searchResults
+
+        XCTAssertThrowsError(try model.selectSearchResult(stalePlace)) { error in
+            XCTAssertEqual(error as? LocationMapError, .staleSearchSelection)
+        }
+
+        XCTAssertEqual(model.preview, preview)
+        XCTAssertEqual(model.mapSearchGeneration, generation)
+        XCTAssertEqual(model.previewCameraIntent, intent)
+        XCTAssertEqual(model.searchResults, results)
+    }
+
     func testSelectedSearchResultBecomesPreviewAndRequiresExplicitConfirmation() throws {
         let model = LocationMapModel()
         let request = try model.beginSearch(query: "Taipei 101")
@@ -17,7 +105,7 @@ final class LocationMapModelTests: XCTestCase {
             model.receiveSearchResults([place], for: request),
             .applied
         )
-        try model.selectSearchResult(place, from: request)
+        try model.selectSearchResult(place)
 
         XCTAssertEqual(model.preview, place)
         XCTAssertTrue(model.selectionRequiresExplicitConfirmation)
@@ -34,7 +122,7 @@ final class LocationMapModelTests: XCTestCase {
         let request = try model.beginSearch(query: "Taipei 101")
         XCTAssertEqual(model.receiveSearchResults([place], for: request), .applied)
 
-        try model.selectSearchResult(place, from: request)
+        try model.selectSearchResult(place)
 
         let searchIntent = try XCTUnwrap(model.previewCameraIntent)
         XCTAssertEqual(searchIntent.coordinate, place.coordinate)
@@ -56,14 +144,14 @@ final class LocationMapModelTests: XCTestCase {
         )
         let request = try model.beginSearch(query: "Taipei 101")
         XCTAssertEqual(model.receiveSearchResults([place], for: request), .applied)
-        try model.selectSearchResult(place, from: request)
+        try model.selectSearchResult(place)
         let selectedIntent = try XCTUnwrap(model.previewCameraIntent)
 
-        XCTAssertThrowsError(
-            try model.selectSearchResult(place, from: request)
-        )
+        try model.selectSearchResult(place)
+        let repeatedIntent = try XCTUnwrap(model.previewCameraIntent)
+        XCTAssertNotEqual(repeatedIntent.identity, selectedIntent.identity)
         XCTAssertThrowsError(try model.beginSearch(query: "   "))
-        XCTAssertEqual(model.previewCameraIntent, selectedIntent)
+        XCTAssertEqual(model.previewCameraIntent, repeatedIntent)
 
         _ = try model.beginSearch(query: "新搜尋")
         XCTAssertNil(model.previewCameraIntent)
@@ -73,7 +161,7 @@ final class LocationMapModelTests: XCTestCase {
             model.receiveSearchResults([place], for: secondRequest),
             .applied
         )
-        try model.selectSearchResult(place, from: secondRequest)
+        try model.selectSearchResult(place)
         XCTAssertNotNil(model.previewCameraIntent)
 
         try model.clearSearch()
@@ -84,7 +172,7 @@ final class LocationMapModelTests: XCTestCase {
             model.receiveSearchResults([place], for: thirdRequest),
             .applied
         )
-        try model.selectSearchResult(place, from: thirdRequest)
+        try model.selectSearchResult(place)
         XCTAssertNotNil(model.previewCameraIntent)
 
         try model.resetWorkspace()
@@ -121,7 +209,7 @@ final class LocationMapModelTests: XCTestCase {
             model.receiveSearchResults([place], for: searchRequest),
             .applied
         )
-        try model.selectSearchResult(place, from: searchRequest)
+        try model.selectSearchResult(place)
         let searchIntent = try XCTUnwrap(model.previewCameraIntent)
 
         XCTAssertEqual(
@@ -546,7 +634,7 @@ final class LocationMapModelTests: XCTestCase {
             model.receiveSearchResults([a], for: searchRequest),
             .applied
         )
-        try model.selectSearchResult(a, from: searchRequest)
+        try model.selectSearchResult(a)
         try model.assignPreview(to: .a)
         try model.selectMapCoordinate(
             coordinate(latitude: 25.04, longitude: 121.57)
@@ -817,7 +905,7 @@ final class LocationMapModelTests: XCTestCase {
         )
         let request = try model.beginSearch(query: "Taipei 101")
         XCTAssertEqual(model.receiveSearchResults([place], for: request), .applied)
-        try model.selectSearchResult(place, from: request)
+        try model.selectSearchResult(place)
 
         let mapView = CameraOperationSpyMapView()
         let coordinator = LocationMapCanvas.Coordinator(
@@ -889,7 +977,7 @@ final class LocationMapModelTests: XCTestCase {
             model.receiveSearchResults([placeA], for: firstRequest),
             .applied
         )
-        try model.selectSearchResult(placeA, from: firstRequest)
+        try model.selectSearchResult(placeA)
         let firstIntent = try XCTUnwrap(model.previewCameraIntent)
 
         let mapView = CameraOperationSpyMapView()
@@ -942,7 +1030,7 @@ final class LocationMapModelTests: XCTestCase {
             model.receiveSearchResults([placeA], for: secondRequest),
             .applied
         )
-        try model.selectSearchResult(placeA, from: secondRequest)
+        try model.selectSearchResult(placeA)
         let secondIntent = try XCTUnwrap(model.previewCameraIntent)
         coordinator.update(
             preview: model.preview,

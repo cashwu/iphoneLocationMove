@@ -421,6 +421,219 @@ final class ContentViewTests: XCTestCase {
         XCTAssertTrue(markerWasRemoved)
     }
 
+    func testSearchResultActionsMoveSamePreviewMarkerAndRecenterRepeatedSelection() async throws {
+        let model = LocationMapModel()
+        var searchCancellationRequestCount = 0
+        var previewAddressCancellationRequestCount = 0
+        let dakeng = try searchPlace(
+            latitude: 24.181_230,
+            longitude: 120.732_480,
+            address: "大坑"
+        )
+        let dakengVillage = try searchPlace(
+            latitude: 24.184_092,
+            longitude: 120.741_168,
+            address: "大坑里"
+        )
+        try configureSearchResults(
+            [dakeng, dakengVillage],
+            query: "大坑",
+            in: model
+        )
+        let (hostingView, window) = makeMapHostingView(
+            model: model,
+            onSearchCancellationRequested: {
+                searchCancellationRequestCount += 1
+            },
+            onPreviewAddressCancellationRequested: {
+                previewAddressCancellationRequestCount += 1
+            }
+        )
+        defer { removeFromWindow(window) }
+
+        await waitForViewUpdate(hostingView)
+        let mapView = try XCTUnwrap(findMapView(in: hostingView))
+        let selectDakeng = try XCTUnwrap(
+            findButton(
+                in: hostingView,
+                identifier: "search-result-selection-action-0"
+            )
+        )
+        selectDakeng.performClick(nil)
+
+        let firstAnnotation = try await waitForPreviewMarker(
+            at: dakeng.coordinate,
+            in: mapView
+        )
+        let firstCameraIntent = try XCTUnwrap(model.previewCameraIntent)
+        XCTAssertEqual(model.preview, dakeng)
+        XCTAssertEqual(searchCancellationRequestCount, 1)
+        XCTAssertEqual(previewAddressCancellationRequestCount, 1)
+        try await waitForMapCenter(dakeng.coordinate, in: mapView)
+
+        let selectDakengVillage = try XCTUnwrap(
+            findButton(
+                in: hostingView,
+                identifier: "search-result-selection-action-1"
+            )
+        )
+        selectDakengVillage.performClick(nil)
+
+        let secondAnnotation = try await waitForPreviewMarker(
+            at: dakengVillage.coordinate,
+            in: mapView
+        )
+        let secondCameraIntent = try XCTUnwrap(model.previewCameraIntent)
+        XCTAssertTrue(firstAnnotation === secondAnnotation)
+        XCTAssertEqual(model.preview, dakengVillage)
+        XCTAssertNotEqual(firstCameraIntent.identity, secondCameraIntent.identity)
+        XCTAssertEqual(searchCancellationRequestCount, 2)
+        XCTAssertEqual(previewAddressCancellationRequestCount, 2)
+        try await waitForMapCenter(dakengVillage.coordinate, in: mapView)
+
+        let movedCoordinate = try MapCoordinate(
+            latitude: 24.2,
+            longitude: 120.7
+        )
+        mapView.setCenter(
+            CLLocationCoordinate2D(
+                latitude: movedCoordinate.latitude,
+                longitude: movedCoordinate.longitude
+            ),
+            animated: false
+        )
+        let repeatedDakengVillage = try XCTUnwrap(
+            findButton(
+                in: hostingView,
+                identifier: "search-result-selection-action-1"
+            )
+        )
+        repeatedDakengVillage.performClick(nil)
+
+        let repeatedCameraIntent = try XCTUnwrap(model.previewCameraIntent)
+        XCTAssertNotEqual(
+            secondCameraIntent.identity,
+            repeatedCameraIntent.identity
+        )
+        XCTAssertEqual(searchCancellationRequestCount, 3)
+        XCTAssertEqual(previewAddressCancellationRequestCount, 3)
+        try await waitForMapCenter(dakengVillage.coordinate, in: mapView)
+    }
+
+    func testStaleRenderedSearchResultActionPreservesNewSearchOwnership() async throws {
+        let model = LocationMapModel()
+        var searchCancellationRequestCount = 0
+        var previewAddressCancellationRequestCount = 0
+        let oldPlace = try searchPlace(
+            latitude: 24.181_230,
+            longitude: 120.732_480,
+            address: "舊結果"
+        )
+        try configureSearchResults([oldPlace], query: "舊搜尋", in: model)
+        let (hostingView, window) = makeMapHostingView(
+            model: model,
+            onSearchCancellationRequested: {
+                searchCancellationRequestCount += 1
+            },
+            onPreviewAddressCancellationRequested: {
+                previewAddressCancellationRequestCount += 1
+            }
+        )
+        defer { removeFromWindow(window) }
+
+        await waitForViewUpdate(hostingView)
+        let staleRenderedAction = try XCTUnwrap(
+            findButton(
+                in: hostingView,
+                identifier: "search-result-selection-action-0"
+            )
+        )
+        let newRequest = try model.beginSearch(query: "較新搜尋")
+        let generationBeforeStaleAction = model.mapSearchGeneration
+
+        // Intentionally trigger the retained action before SwiftUI can rebind it.
+        staleRenderedAction.performClick(nil)
+
+        XCTAssertEqual(searchCancellationRequestCount, 0)
+        XCTAssertEqual(previewAddressCancellationRequestCount, 0)
+        XCTAssertEqual(model.mapSearchGeneration, generationBeforeStaleAction)
+        XCTAssertNil(model.preview)
+        XCTAssertNil(model.previewCameraIntent)
+        XCTAssertTrue(model.searchResults.isEmpty)
+        let showsStaleSelectionError = await waitForIdentifier(
+            "sidebar-workspace-message-region",
+            in: hostingView
+        )
+        XCTAssertTrue(showsStaleSelectionError)
+
+        let newPlace = try searchPlace(
+            latitude: 24.149_992,
+            longitude: 120.741_168,
+            address: "較新結果"
+        )
+        XCTAssertEqual(
+            model.receiveSearchResults([newPlace], for: newRequest),
+            .applied
+        )
+        XCTAssertEqual(model.searchResults, [newPlace])
+    }
+
+    func testStaleRenderedSearchResultActionPreservesPreviewAddressOwnership() async throws {
+        let model = LocationMapModel()
+        var searchCancellationRequestCount = 0
+        var previewAddressCancellationRequestCount = 0
+        let oldPlace = try searchPlace(
+            latitude: 24.181_230,
+            longitude: 120.732_480,
+            address: "舊結果"
+        )
+        try configureSearchResults([oldPlace], query: "舊搜尋", in: model)
+        let (hostingView, window) = makeMapHostingView(
+            model: model,
+            onSearchCancellationRequested: {
+                searchCancellationRequestCount += 1
+            },
+            onPreviewAddressCancellationRequested: {
+                previewAddressCancellationRequestCount += 1
+            }
+        )
+        defer { removeFromWindow(window) }
+
+        await waitForViewUpdate(hostingView)
+        let staleRenderedAction = try XCTUnwrap(
+            findButton(
+                in: hostingView,
+                identifier: "search-result-selection-action-0"
+            )
+        )
+        let currentCoordinate = try MapCoordinate(
+            latitude: 24.2,
+            longitude: 120.7
+        )
+        let addressRequest = try model.selectMapCoordinate(currentCoordinate)
+        let generationBeforeStaleAction = model.mapSearchGeneration
+
+        // Intentionally trigger the retained action before SwiftUI can rebind it.
+        staleRenderedAction.performClick(nil)
+
+        XCTAssertEqual(searchCancellationRequestCount, 0)
+        XCTAssertEqual(previewAddressCancellationRequestCount, 0)
+        XCTAssertEqual(model.mapSearchGeneration, generationBeforeStaleAction)
+        XCTAssertEqual(model.preview?.coordinate, currentCoordinate)
+        XCTAssertNil(model.preview?.address)
+        XCTAssertNil(model.previewCameraIntent)
+        let showsStaleSelectionError = await waitForIdentifier(
+            "sidebar-workspace-message-region",
+            in: hostingView
+        )
+        XCTAssertTrue(showsStaleSelectionError)
+        XCTAssertEqual(
+            model.receivePreviewAddress("目前地址", for: addressRequest),
+            .applied
+        )
+        XCTAssertEqual(model.preview?.address, "目前地址")
+    }
+
     func testSetupReadyReplacesDisconnectedControlsInSameHostingView() async throws {
         let store = try makeStore()
         let hostingView = NSHostingView(
@@ -475,7 +688,9 @@ final class ContentViewTests: XCTestCase {
         simulationStore: SimulationStore? = nil,
         model: LocationMapModel = LocationMapModel(),
         initialQuery: String = "",
-        initialRoundTrip: Bool = false
+        initialRoundTrip: Bool = false,
+        onSearchCancellationRequested: @escaping () -> Void = {},
+        onPreviewAddressCancellationRequested: @escaping () -> Void = {}
     ) -> (NSHostingView<LocationMapView>, NSWindow) {
         let hostingView = NSHostingView(
             rootView: LocationMapView(
@@ -486,7 +701,10 @@ final class ContentViewTests: XCTestCase {
                 model: model,
                 initialQuery: initialQuery,
                 initialRoundTrip: initialRoundTrip,
-                presentsResetConfirmationDialog: false
+                presentsResetConfirmationDialog: false,
+                onSearchCancellationRequested: onSearchCancellationRequested,
+                onPreviewAddressCancellationRequested:
+                    onPreviewAddressCancellationRequested
             )
         )
         let window = NSWindow(
@@ -499,6 +717,32 @@ final class ContentViewTests: XCTestCase {
         window.orderFrontRegardless()
         hostingView.layoutSubtreeIfNeeded()
         return (hostingView, window)
+    }
+
+    private func searchPlace(
+        latitude: Double,
+        longitude: Double,
+        address: String
+    ) throws -> MapSearchPlace {
+        MapSearchPlace(
+            coordinate: try MapCoordinate(
+                latitude: latitude,
+                longitude: longitude
+            ),
+            address: address
+        )
+    }
+
+    private func configureSearchResults(
+        _ places: [MapSearchPlace],
+        query: String,
+        in model: LocationMapModel
+    ) throws {
+        let request = try model.beginSearch(query: query)
+        XCTAssertEqual(
+            model.receiveSearchResults(places, for: request),
+            .applied
+        )
     }
 
     private func configuredRouteModel() throws -> LocationMapModel {
@@ -862,6 +1106,44 @@ final class ContentViewTests: XCTestCase {
         return root.subviews.lazy.compactMap(findMapView).first
     }
 
+    private func waitForPreviewMarker(
+        at coordinate: MapCoordinate,
+        in mapView: MKMapView
+    ) async throws -> MKAnnotation {
+        for _ in 0 ..< 100 {
+            mapView.window?.displayIfNeeded()
+            if let annotation = mapView.annotations.first(where: {
+                $0.title == "預覽"
+                    && abs($0.coordinate.latitude - coordinate.latitude)
+                        < 0.000_001
+                    && abs($0.coordinate.longitude - coordinate.longitude)
+                        < 0.000_001
+            }) {
+                return annotation
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw ContentViewTestError.previewMarkerNotFound
+    }
+
+    private func waitForMapCenter(
+        _ coordinate: MapCoordinate,
+        in mapView: MKMapView
+    ) async throws {
+        for _ in 0 ..< 100 {
+            mapView.window?.displayIfNeeded()
+            if abs(mapView.centerCoordinate.latitude - coordinate.latitude)
+                < 0.000_001,
+               abs(mapView.centerCoordinate.longitude - coordinate.longitude)
+                < 0.000_001
+            {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw ContentViewTestError.mapCenterDidNotUpdate
+    }
+
     private func waitForRouteMarker(
         in mapView: MKMapView,
         longitudeDifferentFrom previousLongitude: CLLocationDegrees? = nil
@@ -991,6 +1273,8 @@ final class ContentViewTests: XCTestCase {
 }
 
 private enum ContentViewTestError: Error {
+    case mapCenterDidNotUpdate
+    case previewMarkerNotFound
     case routeMarkerNotFound
 }
 

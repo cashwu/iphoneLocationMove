@@ -314,14 +314,8 @@ final class LocationMapModel: ObservableObject {
         return .applied
     }
 
-    func selectSearchResult(
-        _ place: MapSearchPlace,
-        from request: MapSearchRequest
-    ) throws {
-        guard request == activeSearchRequest,
-              request.generation == mapSearchGeneration,
-              searchResults.contains(place)
-        else {
+    func selectSearchResult(_ place: MapSearchPlace) throws {
+        guard searchResults.contains(place) else {
             throw LocationMapError.staleSearchSelection
         }
         try advanceSearchOwnership()

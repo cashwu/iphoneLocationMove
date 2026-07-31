@@ -97,13 +97,44 @@ tests:
 
 ### Requirement: 地圖搜尋、選點與明確確認
 
-系統 SHALL 使用 MapKit 顯示地圖，支援地名／地址搜尋與直接點擊選點。搜尋或點擊只 SHALL 更新 preview marker、地址與座標，MUST NOT 立即改變 iPhone 位置。搜尋結果選取 MAY 以程式化 camera 將地圖移至結果；直接點擊選點 MUST 保留點擊當下的完整 visible region，MUST NOT 因 preview 更新而平移、置中或縮放 camera。
+系統 SHALL 使用 MapKit 顯示地圖，支援地名／地址搜尋與直接點擊選點。搜尋或點擊只 SHALL 更新 preview marker、地址與座標，MUST NOT 立即改變 iPhone 位置。搜尋結果選取 MAY 以程式化 camera 將地圖移至結果；目前仍顯示的每一筆搜尋結果 SHALL 在每次選取時保持可用，並以新的 `MapSearchGeneration` camera intent 更新 preview 與將地圖移至該結果，即使再次選取相同結果亦同。直接點擊選點 MUST 保留點擊當下的完整 visible region，MUST NOT 因 preview 更新而平移、置中或縮放 camera。
 
 #### Scenario: 搜尋並預覽地點
 
 - **WHEN** 使用者搜尋地名或地址並選擇結果
 - **THEN** 系統 SHALL 將地圖移至結果並顯示 preview marker、地址與座標
 - **AND** iPhone 定位 MUST 保持不變
+
+#### Scenario: 連續選取目前顯示的不同搜尋結果
+
+- **GIVEN** 搜尋結果清單仍顯示位置 A 與位置 B
+- **WHEN** 使用者先選取位置 A，再選取位置 B
+- **THEN** 每次選取 SHALL 建立不同的 `MapSearchGeneration` camera intent
+- **AND** 最後的 preview marker、地址與座標 SHALL 對應位置 B
+- **AND** 地圖 SHALL 移至位置 B
+- **AND** iPhone 定位 MUST 保持不變
+
+##### Example: 從「大坑」切換至「大坑里」
+
+- 使用者選取「大坑」→ preview marker 與地圖移至「大坑」座標
+- 搜尋結果清單仍顯示時，使用者選取「大坑里」→ 同一個 preview marker 與地圖移至「大坑里」座標
+
+#### Scenario: 再次選取同一筆顯示中的搜尋結果
+
+- **GIVEN** 使用者已選取位置 A，且位置 A 仍顯示於搜尋結果清單
+- **AND** 使用者之後手動將 camera 移離位置 A
+- **WHEN** 使用者再次選取位置 A
+- **THEN** 系統 SHALL 建立新的 `MapSearchGeneration` camera intent
+- **AND** 系統 SHALL 將地圖重新移至位置 A
+- **AND** 先前位置 A 的已消耗 intent MUST NOT 抑制本次置中
+
+#### Scenario: 重繪前的舊結果 action 不取消較新搜尋
+
+- **GIVEN** 使用者已啟動較新的搜尋，且先前結果的舊 action 在 view 重繪完成前仍可能被觸發
+- **WHEN** 該舊 action 對不在目前 `searchResults` 的結果發出選取
+- **THEN** 系統 SHALL 拒絕該 stale selection
+- **AND** 較新的 MapKit search 與 preview-address lookup MUST NOT 被該舊 action 取消
+- **AND** 較新搜尋結果到達後 SHALL 仍可成為 current `searchResults`
 
 #### Scenario: 回到相同搜尋座標仍重新置中
 
@@ -158,11 +189,12 @@ tests:
 - **AND** 系統 MUST NOT 因忽略舊 response 或更新 preview 地址而改變 camera
 
 <!-- @trace
-source: preserve-map-camera-on-click
-updated: 2026-07-30
+source: fix-repeat-search-result-selection
+updated: 2026-07-31
 code:
   - iPhoneLocationMove/Features/Map/LocationMapModel.swift
   - iPhoneLocationMove/Features/Map/LocationMapView.swift
+  - iPhoneLocationMoveTests/ContentViewTests.swift
   - iPhoneLocationMoveTests/LocationMapModelTests.swift
 tests:
 -->

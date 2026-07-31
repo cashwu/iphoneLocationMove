@@ -50,6 +50,10 @@ struct LocationMapView: View {
     @ObservedObject private var macLocationCoordinator: MacLocationCoordinator
     private let simulationStore: SimulationStore?
     private let presentsResetConfirmationDialog: Bool
+    #if DEBUG
+    private var onSearchCancellationRequested: () -> Void = {}
+    private var onPreviewAddressCancellationRequested: () -> Void = {}
+    #endif
     @State private var query = ""
     @State private var searchRequest: MapSearchRequest?
     @State private var activeSearch: MKLocalSearch?
@@ -77,6 +81,31 @@ struct LocationMapView: View {
         self.macLocationCoordinator = macLocationCoordinator
         self.presentsResetConfirmationDialog = presentsResetConfirmationDialog
     }
+
+    #if DEBUG
+    init(
+        simulationStore: SimulationStore? = nil,
+        macLocationCoordinator: MacLocationCoordinator = MacLocationCoordinator(),
+        model: LocationMapModel = LocationMapModel(),
+        initialQuery: String = "",
+        initialRoundTrip: Bool = false,
+        presentsResetConfirmationDialog: Bool = true,
+        onSearchCancellationRequested: @escaping () -> Void,
+        onPreviewAddressCancellationRequested: @escaping () -> Void
+    ) {
+        self.init(
+            simulationStore: simulationStore,
+            macLocationCoordinator: macLocationCoordinator,
+            model: model,
+            initialQuery: initialQuery,
+            initialRoundTrip: initialRoundTrip,
+            presentsResetConfirmationDialog: presentsResetConfirmationDialog
+        )
+        self.onSearchCancellationRequested = onSearchCancellationRequested
+        self.onPreviewAddressCancellationRequested =
+            onPreviewAddressCancellationRequested
+    }
+    #endif
 
     var body: some View {
         HStack(spacing: 0) {
@@ -269,6 +298,18 @@ struct LocationMapView: View {
                     }
                     .buttonStyle(.plain)
                     .testingLayoutRegion("sidebar-button-search-result-\(offset)")
+                    .background {
+                        #if DEBUG
+                        TestingActionMarker(
+                            identifier: "search-result-selection-action-\(offset)",
+                            isEnabled: true
+                        ) {
+                            selectSearchResult(place)
+                        }
+                        .frame(width: 0, height: 0)
+                        .allowsHitTesting(false)
+                        #endif
+                    }
                 }
             }
         }
@@ -440,14 +481,11 @@ struct LocationMapView: View {
     }
 
     private func selectSearchResult(_ place: MapSearchPlace) {
-        guard let searchRequest else {
-            return
-        }
-        cancelSearch()
-        cancelPreviewAddressLookup()
         do {
-            try model.selectSearchResult(place, from: searchRequest)
-            self.searchRequest = nil
+            try model.selectSearchResult(place)
+            cancelSearch()
+            cancelPreviewAddressLookup()
+            searchRequest = nil
             message = nil
         } catch {
             show(error)
@@ -525,6 +563,9 @@ struct LocationMapView: View {
     }
 
     private func cancelSearch() {
+        #if DEBUG
+        onSearchCancellationRequested()
+        #endif
         activeSearch?.cancel()
         activeSearch = nil
     }
@@ -572,6 +613,9 @@ struct LocationMapView: View {
     }
 
     private func cancelPreviewAddressLookup() {
+        #if DEBUG
+        onPreviewAddressCancellationRequested()
+        #endif
         activeGeocoder?.cancelGeocode()
         activeGeocoder = nil
     }
