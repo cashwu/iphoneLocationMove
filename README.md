@@ -62,19 +62,51 @@ purposes only**. By using this tool, you acknowledge and agree that:
 
 ## 環境需求
 
+執行 App：
+
 - macOS 13+
-- Xcode，且已登入可用的 Apple Development 帳號
 - Apple Silicon Mac（目前內嵌的 privileged tunnel wheelhouse 是 arm64）
 - iOS 17+ iPhone
 - 可傳輸資料的 USB 線
 - iPhone 已解鎖、信任這台 Mac，且已開啟 Developer Mode
 - Python 3.9+，或 PATH 中已有功能相容的 `pymobiledevice3`
 
+從原始碼建置另需：
+
+- Xcode，且已登入可用的 Apple Development 帳號
+
 開啟 Developer Mode：
 
 1. 在 iPhone 前往「設定 → 隱私權與安全性 → 開發者模式」。
 2. 開啟後依提示重新啟動 iPhone。
 3. 重新解鎖並確認啟用。
+
+## 下載安裝
+
+最新版本可從 [Releases](https://github.com/cashwu/iphoneLocationMove/releases/latest)
+取得 `iPhoneLocationMove-<version>.dmg`。
+
+1. 下載並開啟 DMG，把 `iPhoneLocationMove.app` 拖到「應用程式」。
+2. 這個 DMG 以 **Apple Development 憑證簽署，未經 Apple 公證（notarization）**，
+   從瀏覽器下載後會被 Gatekeeper 擋下。首次執行前需自行移除 quarantine 屬性：
+
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/iPhoneLocationMove.app
+   ```
+
+3. 開啟 App，依「[首次執行](#首次執行)」完成裝置支援安裝與 helper 授權。
+
+> **⚠️ 關於預先建置的 DMG**
+>
+> - 未公證代表 macOS 不會替你驗證這個安裝檔的來源與完整性；你必須自行確認
+>   DMG 確實來自本 repo 的 Releases 頁面。移除 quarantine 等於跳過 macOS 的
+>   來源檢查，請只對你自己確認過來源的檔案這樣做。
+> - 這個 build 帶有 `com.apple.security.get-task-allow`（開發用 entitlement），
+>   並非適合大規模散布的正式版本。
+> - App 會安裝一個以 root 執行的 privileged helper。安裝前請先閱讀
+>   [免責聲明](#免責聲明)並自行評估風險。
+> - 若不接受以上限制，請改用「[從 Xcode 建置與執行](#從-xcode-建置與執行)」，
+>   以你自己的 Apple Development Team 簽署後執行。
 
 ## 從 Xcode 建置與執行
 
@@ -220,7 +252,9 @@ build/iPhoneLocationMove-<version>.dmg
 
 這些產物保留 Apple Development 簽署，只供已設定相同 Team 的本機開發與驗證。
 腳本不會改成 ad-hoc signing，也不會產生已公證（notarized）、適合直接散布給
-一般使用者的版本。若要正式對外發佈安裝檔，仍須完成 Developer ID、hardened
+一般使用者的版本。目前 [Releases](https://github.com/cashwu/iphoneLocationMove/releases)
+上的 DMG 即由此腳本產生，因此屬於未公證版本，安裝方式與限制見
+「[下載安裝](#下載安裝)」。若要正式對外發佈安裝檔，仍須完成 Developer ID、hardened
 runtime、公證流程與 privileged helper security review。
 
 ## 故障排除
