@@ -1,6 +1,6 @@
 format	cash-portable-manifest-v1
-bundle_version	2.15.0
-runtime_generation	ac4fee60f1d1fd1b029f51078e74903b5cf11c8f6350544b4491b58b942f978c
+bundle_version	2.16.0
+runtime_generation	aa6dab34d9dff18b5d8133df1d6019c8d8e3454452e44fea8ba62f78cf2d4d7f
 stable	.cash-skills/bin/cash	e7457338cfd6721fcc21fbbf96fad287176ebec674be6a12fc4e9ff27542804e	100755
 stable	.cash-workspace.lock	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	100644
 runtime	.cash-skills/lib/cash_cli/__init__.py	63c4171d2fcef559b4dea3a0264a22a8ae129b8afd007d488097c614028aa250	100644
@@ -16,14 +16,14 @@ runtime	.cash-skills/lib/cash_cli/commands/tasks.py	40edd7cb70653c71e3ba7faa4884
 runtime	.cash-skills/lib/cash_cli/commands/validate.py	db5301a8cadd0c7ff7be923ae9d4f84546279c7b8b4cdb183d47d8f17ee33e13	100644
 runtime	.cash-skills/lib/cash_cli/config.py	8eefdd3be634152c6a13f7103e4f66cd488fa2fdac801604005d767e618e02b5	100644
 runtime	.cash-skills/lib/cash_cli/errors.py	243f121d3aa1d004605fbbc6d8f5c69b476ae4abac29e927be18e592a799e968	100644
-runtime	.cash-skills/lib/cash_cli/installer.py	c3a3b95968780f3326f589fcf0863dd6fdf3dc91a82833b38fec75a92ae43da6	100644
+runtime	.cash-skills/lib/cash_cli/installer.py	6089ea4a298af0d1e07c57c6236716bd37f3269f9bfd740c11268dcbdccbcf4f	100644
 runtime	.cash-skills/lib/cash_cli/main.py	d8619122b76e76d89dedbcc1159d202477881a1c9961ae5835b0532df47330a2	100644
 runtime	.cash-skills/lib/cash_cli/resources.py	bb21b9bfb1ffaff948c893e7568e4a2e9ba5bb88be8a84dca7cc4e3aac7a820c	100644
 runtime	.cash-skills/lib/cash_cli/spec_merge.py	ad3c612b4eafcd766b4c47585febfa29de7dde8ee5236543918351a844abe1fb	100644
 runtime	.cash-skills/lib/cash_cli/validation.py	7494144a57456c9d07702c8cb63af86d5da13c9d691f1bbe1e4720021368322f	100644
 runtime	.cash-skills/lib/cash_cli/workspace.py	f403238b65310fa5e11d0a9ff7f5741ddc3cae3fb2f4ae0753cfeea208ec06ed	100644
 skill	.agents/skills/cash-analyze/SKILL.md	1a528cb58aa72dbeb4d8fbea0bf221939c4b937d3f640db5323d39913f014a0e	100644
-skill	.agents/skills/cash-apply/SKILL.md	b8a5250bf4ac3d87adf7b7cdae83febec490cffe043797e48e62afa916a37dad	100644
+skill	.agents/skills/cash-apply/SKILL.md	af36b2cf9ec794eb7dad7cd6c3325327475111c0efba7275fd76545ba6932b2f	100644
 skill	.agents/skills/cash-archive/SKILL.md	30643956fcde482875760d17bef63ada78399a345e919857e91bab638c84b002	100644
 skill	.agents/skills/cash-ask/SKILL.md	bcf75658a2c62b7cba947885020de3c1266f9d96436c2120dc3b89094d06a563	100644
 skill	.agents/skills/cash-audit/SKILL.md	5df064bec4dc4da5ff6f41bd55ec15d46ae5633fc1618df2d7f2dc2b04a24daa	100644
@@ -32,10 +32,10 @@ skill	.agents/skills/cash-debug/SKILL.md	3fe3278ea02c9380db0c3c8ba28f482a21d8f36
 skill	.agents/skills/cash-discuss/SKILL.md	3a2f4d1429e9b3de91f7b8d12b85266dff6e93e85b06d26f180b22abffca9b47	100644
 skill	.agents/skills/cash-drift/SKILL.md	1106730962ce906a36006b0cbac8ee57fe2f9a6343e0ce360623ee98057d930e	100644
 skill	.agents/skills/cash-ingest/SKILL.md	a9e6a83e8f350f2874a9834bf4613af92900bd3478f14127bba349f2b629f0e4	100644
-skill	.agents/skills/cash-propose/SKILL.md	2429493e80d107cfc8172d759fe67d9aeeaf18be3d1ca483e979ec2f4b020094	100644
+skill	.agents/skills/cash-propose/SKILL.md	2ce2bd74ab3566c8e87db13caf939dd2c02c9c89c8f75a34a19fb923bf7c72d3	100644
 skill	.agents/skills/cash-verify/SKILL.md	d28895620d908264ae802967134d3154b8bb19a8808cbc393856f26db8dc5d11	100644
 skill	.claude/skills/cash-analyze/SKILL.md	8d4b436c1a26c46558b212b528ba564679a56eef11041b628072d13f8e38fa8e	100644
-skill	.claude/skills/cash-apply/SKILL.md	b69e4416e33cbf267d6a68c4ec55482ed78dac13e2596c614e651cc44284d32b	100644
+skill	.claude/skills/cash-apply/SKILL.md	9e7142242aee482c28dd26a5a517b6ac2615c3d11186e6641e629b3c4327c736	100644
 skill	.claude/skills/cash-archive/SKILL.md	d5b6739b0f079fc74e507e23faa0d551bdd6c8f66b78ee846bcb3c2d259935c6	100644
 skill	.claude/skills/cash-ask/SKILL.md	d9532dd36ccab61026f9012923b31ecda210e493530d4c9e8752bb587bfd1026	100644
 skill	.claude/skills/cash-audit/SKILL.md	306c04d549b53a98dcdcc403fc077fa6e1da5801212dd20e1465509c93235852	100644
@@ -44,5 +44,5 @@ skill	.claude/skills/cash-debug/SKILL.md	c6f2f48d59a174491431b1c11f07ac06abb3a09
 skill	.claude/skills/cash-discuss/SKILL.md	bc9c1d97540e4f2daf4fa984bfa1bbd3c06c5b85af24f12ea93858a3e570e1f5	100644
 skill	.claude/skills/cash-drift/SKILL.md	20fd2c71a41ed9eec8830a35bb2db72b4651248d63e367dea16ebe751394d0ab	100644
 skill	.claude/skills/cash-ingest/SKILL.md	c915611ae9a2c4e5f74349e8c6c004d889226a4aa9e004690c5ef6e36264f4fb	100644
-skill	.claude/skills/cash-propose/SKILL.md	84049289d5744509222315f97543546a24f253387135e80251b4d5045b754b66	100644
+skill	.claude/skills/cash-propose/SKILL.md	d89c88e6c6fc57bacd2863ed602d4654f64e7bc119a9d5815560c15daac1e9c4	100644
 skill	.claude/skills/cash-verify/SKILL.md	03056fcef1c369df8045031b072ed37445a8e4793e30ec3afde4c5f38d67c251	100644

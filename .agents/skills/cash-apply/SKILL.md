@@ -205,12 +205,19 @@ The trigger is guidance only — it MUST NOT block apply from proceeding when th
      - is vague ("handle edge cases", "wire it up", "make it work");
      - conflicts with the implementation contract (asks for behavior the contract excludes, or omits behavior the contract requires).
        When this happens, pause. Either update the artifact (design or tasks) so the task names a concrete behavior and verification target, or report the blocker and wait for guidance. Do NOT silently guess against unclear requirements.
-   - Before writing code, check:
-     1. **Reuse** — search adjacent modules and shared utilities for existing implementations before writing new code
-     2. **Quality** — derive values from existing state instead of duplicating; use existing types and constants over new literals
-     3. **Efficiency** — parallelize independent async operations; avoid unnecessary awaits; match operation scope to actual need
-     4. **No Placeholders in artifacts** — if the design or spec for this task contains placeholder language (TBD, TODO, "add appropriate handling"), pause and fix the artifact first or flag to the user. Do not implement against vague requirements.
-     5. **Examples as verification** — if the spec for this task's scope includes `##### Example:` blocks, treat them as high-fidelity acceptance references:
+   - Before writing code, re-read and understand the task, relevant spec, Implementation Contract, and actual call flow. A candidate is eligible only when it preserves observable behavior, interface／data shape, failure modes, acceptance criteria, trust-boundary validation, data-loss prevention, security, and accessibility. A pending task that conflicts with or is unclear against the contract MUST enter the existing unclear-task／blocker triage; MUST NOT use YAGNI to mark it complete or silently skip it.
+   - Apply this ordered minimal-solution ladder and stop at the first eligible rung. If an earlier rung does not satisfy the contract, exclude it and continue:
+     1. `reuse` — use an existing codebase helper, type, module, or established pattern.
+     2. `stdlib` — use the language standard library when it fully covers the contract.
+     3. `native` — use a platform, framework, or database native feature when it fully covers the contract.
+     4. `installed-dependency` — use an already-installed dependency when it fully covers the contract; do not add a dependency for this rung.
+     5. `custom` — write the smallest clear custom implementation that fully covers the contract.
+   - When multiple candidates are eligible, choose the earlier rung. Within the same rung among candidates of comparable cost, choose stronger edge-case correctness first, then the candidate that follows the existing codebase pattern. A choice among contract-preserving candidates does not create a new pause condition.
+   - Then check:
+     1. **Quality** — derive values from existing state instead of duplicating; use existing types and constants over new literals
+     2. **Efficiency** — parallelize independent async operations; avoid unnecessary awaits; match operation scope to actual need
+     3. **No Placeholders in artifacts** — if the design or spec for this task contains placeholder language (TBD, TODO, "add appropriate handling"), pause and fix the artifact first or flag to the user. Do not implement against vague requirements.
+     4. **Examples as verification** — if the spec for this task's scope includes `##### Example:` blocks, treat them as high-fidelity acceptance references:
         - Cover every in-scope example's GIVEN/WHEN/THEN input and expected output, including every row of an example table, in the task's verification evidence.
         - Add cases beyond the examples when there is a concrete risk or boundary reason.
         - The examples are not a closed input set.
@@ -270,6 +277,15 @@ The trigger is guidance only — it MUST NOT block apply from proceeding when th
    - 原因：<why this path was chosen, or why the user needs to weigh in>
    ```
 
+   Preserve this four-field entry shape for every `open-question` and for a `deviation` with no nontrivial known ceiling. Only when the existing protocol already requires a `deviation` for a contract-preserving substitute with a nontrivial, real, known ceiling, append both fields immediately after `原因`; never add only one and never fill either with `none`:
+
+   ```
+   - 限制：<the concrete scale, resource, contention, latency, platform, or algorithmic bound outside the current contract envelope>
+   - 重訪條件：<an observable or measurable trigger for revisiting the mechanism>
+   ```
+
+   A vague trigger such as「之後需要時」or「規模變大時」is insufficient. Routine implementation, an ordinary tradeoff, or an internal choice that does not deviate from an artifact creates no note. If the ceiling would violate current observable behavior, interface／data shape, failure modes, acceptance criteria, or a safety boundary, the substitute is not contract-preserving: do not record it and continue; use the existing pause branch and direct the user to `$cash-ingest`.
+
    Prose (`內容`, `原因`, title) is written in Traditional Chinese, matching the cash-apply response-language rule. CLI commands, file paths, code identifiers, capability slugs, and quoted source text remain verbatim in English.
 
    **When to write an entry**
@@ -290,6 +306,7 @@ The trigger is guidance only — it MUST NOT block apply from proceeding when th
    - **File present with only the initialization comment and no entries**: treat as confirmed empty — cash-apply reached the task loop and found nothing requiring a `deviation` or `open-question` entry. No finding raised by virtue of emptiness alone.
    - **File present with entries**:
      - `deviation` entries are evaluated for whether the divergence is justified. An unjustified deviation is a Critical finding; a justified-but-undocumented-in-`design.md` deviation is at minimum a Warning recommending the divergence be back-filled into `design.md` during Fix Actions.
+     - Reviewer A and Reviewer V also evaluate every known-ceiling `deviation` for paired `限制`／`重訪條件` fields, an observable or measurable trigger, and a ceiling outside the current contract envelope. A missing field, vague trigger, or contract-invasive ceiling is part of the existing deviation-justification finding and does not create a new decision branch.
      - `open-question` entries are surfaced as Warning findings with a recommended `## Fix Actions` step naming how to obtain user confirmation before the round can pass.
 
    The main agent derives the round decision mechanically from the post-filter reviewer findings and does not read this file directly; that round's reviewer findings already incorporate the notes context.
@@ -387,7 +404,11 @@ The trigger is guidance only — it MUST NOT block apply from proceeding when th
    **Fresh sub-agent calls**
    - Full rounds occur only at the run's first round and, when still needed, its fourth-round checkpoint. Each full round MUST spawn exactly TWO fresh reviewer sub-agents in parallel in one message:
      - **Reviewer A — Adherence**: checks that the artifacts (and for cash-apply, the implementation diff) match the prior artifacts. For cash-propose: proposal ↔ design ↔ spec ↔ tasks internal consistency, scope coverage, and acceptance criteria completeness. For cash-apply: implementation matches `design.md` Implementation Contract, `tasks.md` task descriptions, and `spec.md` requirements; `implementation-notes.md` deviations are justified.
-     - **Reviewer B — Quality**: scans for bugs, regressions, missing tests, security sharp edges, and risks NOT directly named in the artifacts. For cash-propose: missing risks, unstated assumptions, scope gaps. For cash-apply: logic bugs, error-handling gaps at real boundaries, untested edge cases from spec `##### Example:` blocks.
+     - **Reviewer B — Quality**: scans for bugs, regressions, missing tests, security sharp edges, and risks NOT directly named in the artifacts. Its complexity lens covers `new dependency`, `single-implementation abstraction`, `pass-through wrapper`, `speculative configuration`, `duplicate existing capability`, and custom mechanisms that present a `stdlib`／`native` replacement opportunity.
+       - For cash-propose: scan proposal, design, and tasks for complexity introduced or permitted by those artifacts without evidence that the contract requires it, in addition to missing risks, unstated assumptions, and scope gaps.
+       - For cash-apply: scan only complexity introduced by the changed diff, in addition to logic bugs, error-handling gaps at real boundaries, and untested edge cases from spec `##### Example:` blocks.
+       - Do not report this lens against pre-existing code, unrelated refactors, mechanisms explicitly required by the contract, or intentional complexity already justified in `design.md`, `implementation-notes.md`, proposal Non-Goals, or `## Alternatives Considered`.
+       - LOC, estimated token use, cost, and time are not inputs to a finding, severity, confidence, or gate decision.
    - Each micro round MUST spawn exactly ONE fresh sub-agent:
      - **Reviewer V — Verification**: performs delta verification against the cumulative blocking set and recorded fixes. Reviewer V MUST return an explicit resolved/unresolved verdict per member, check fix propagation, and report defects introduced by fixes.
    - A pre-spawn short-circuit round uses `round_type: full` and spawns no reviewer; this is the explicit exception for a seeded re-run where all members are withheld under grader protection and no consented exit exists.
