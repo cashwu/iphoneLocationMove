@@ -52,5 +52,8 @@
 ## Cash CLI 啟動信任模式
 
 - `.cash-skills/manifest.tsv` 存在時，clone／pull 後直接使用 project-local `.cash-skills/bin/cash`；舊的 `.cash-skills/receipt.tsv` 不具權威且不會遮蔽 manifest。manifest 存在但為 invalid manifest 時 MUST fail closed，不得 fallback 到 receipt，也不得執行 `--init-receipt`。
-- 只有 `.cash-skills/manifest.tsv` 缺失的 receipt-based target 在 `.cash-skills/bin/cash` 以 `bootstrap_invalid` 失敗時，才引導使用者在專案根執行一次 `PYTHONPATH=.cash-skills/lib python3 -s -P -B -m cash_cli.installer --init-receipt`（需 Python 3.11+）；成功後回報 `initialized` 或 `current`，cash CLI 即可使用。`.cash-skills/receipt.tsv` 是 machine-local identity，不得提交或跨 clone 共用。
+- 只有 `.cash-skills/manifest.tsv` 缺失的 receipt-based target 在 `.cash-skills/bin/cash` 以 `bootstrap_invalid` 失敗、或以 `receipt_invalid` 回報 stable record identity drift 時，才引導使用者在專案根執行一次 `PYTHONPATH=.cash-skills/lib python3 -s -P -B -m cash_cli.installer --init-receipt`（需 Python 3.11+）；成功後回報 `initialized` 或 `current`，cash CLI 即可使用。`.cash-skills/receipt.tsv` 是 machine-local identity，不得提交或跨 clone 共用。
+- stable record content drift 不得以重新簽發處理：digest 與記錄值不符代表內容本身已改變，重跑 `--init-receipt` 只會把該漂移簽為合法。改為把該筆 record 還原成 receipt 記錄的內容，或從可信 source 重新安裝。
+- `.cash-skills/receipt.tsv` 被納入版控時，MUST 先執行 `git rm --cached .cash-skills/receipt.tsv` 解除追蹤，再重新簽發；未解除追蹤就重簽只會讓下一台機器再度 fail closed。取得方式本身不構成可以重新簽發的理由。
+- identity drift 這個入口只在診斷「僅」指名該 stable record 時適用。診斷同時指名 `runtime record drift:` 或 `skill record drift:` 時，MUST 改為把該筆 record 還原成 receipt 記錄的內容或從可信 source 重新安裝，MUST NOT 重新簽發——那種診斷代表重新簽發的前提不成立，重簽會把已漂移的 runtime 或 skill 內容簽為合法。
 <!-- CASH:END -->

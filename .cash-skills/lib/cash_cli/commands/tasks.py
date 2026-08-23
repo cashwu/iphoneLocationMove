@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -15,6 +16,7 @@ from ..workspace import Workspace
 
 _TASK = re.compile(r"^- \[([ xX])\] (\[P\] )?(.+)$")
 _TASK_LABEL = re.compile(r"([0-9]+(?:\.[0-9]+)*)\s+")
+_RESERVED_TASK_ID = "review-loop"
 _IGNORED_PREFIXES = (
     ".cash-skills/state/",
     ".cash-skills/receipt.tsv",
@@ -272,10 +274,67 @@ def _import_legacy(workspace: Workspace, name: str, relative: str) -> dict[str, 
     }
 
 
+def _realign_touched_attribution(
+    workspace: Workspace,
+    name: str,
+    touched: dict[str, object],
+) -> tuple[dict[str, object], bool]:
+    try:
+        tasks_relative = next(
+            (
+                relative
+                for relative in (
+                    f"openspec/changes/{name}/tasks.md",
+                    f"openspec/changes/.parked/{name}/tasks.md",
+                )
+                if workspace.exists(relative)
+            ),
+            None,
+        )
+        if tasks_relative is None:
+            return touched, False
+        entries = _task_entries(workspace.read_text(tasks_relative))
+    except (CashError, OSError):
+        return touched, False
+
+    task_ids_by_description = {description: task_id for _, task_id, description, _ in entries}
+    aligned = copy.deepcopy(touched)
+    legacy = touched["legacy_import"] is not None
+    for item in aligned["touched"]:
+        if item["task_id"] == _RESERVED_TASK_ID:
+            continue
+        task_id = task_ids_by_description.get(item["task_desc"])
+        if task_id is None:
+            if legacy:
+                continue
+            raise CashError(
+                "touched_invalid",
+                f"Touched task description is absent from tasks.md: {item['task_desc']}",
+            )
+        item["task_id"] = task_id
+
+    task_ids = [item["task_id"] for item in aligned["touched"]]
+    if len(task_ids) != len(set(task_ids)):
+        if legacy:
+            return touched, False
+        raise CashError("touched_invalid", "Touched task ids collide after realignment.")
+    aligned["touched"].sort(key=lambda item: item["task_id"].encode("utf-8"))
+    return aligned, aligned != touched
+
+
 def load_or_import_touched(workspace: Workspace, name: str) -> dict[str, object]:
+    value, _ = _load_or_import_touched(workspace, name)
+    return value
+
+
+def _load_or_import_touched(
+    workspace: Workspace,
+    name: str,
+) -> tuple[dict[str, object], bool]:
     relative = _state_relative("touched", name)
     if workspace.exists(relative):
-        return _validate_touched(_read_json(workspace, relative), name)
+        touched = _validate_touched(_read_json(workspace, relative), name)
+        return _realign_touched_attribution(workspace, name, touched)
     legacy_relative = f".spectra/touched/{name}.json"
     if workspace.exists(legacy_relative):
         value = _import_legacy(workspace, name, legacy_relative)
@@ -287,13 +346,14 @@ def load_or_import_touched(workspace: Workspace, name: str) -> dict[str, object]
             "touched": [],
             "files": [],
         }
-    return value
+    return value, False
 
 
 def ensure_touched(workspace: Workspace, name: str) -> dict[str, object]:
     relative = _state_relative("touched", name)
-    value = load_or_import_touched(workspace, name)
-    if workspace.exists(relative):
+    value, changed = _load_or_import_touched(workspace, name)
+    exists = workspace.exists(relative)
+    if exists and not changed:
         return value
     workspace.ensure_directory(".cash-skills/state/touched")
     transaction = workspace.transaction()
@@ -431,6 +491,11 @@ def execute(command: str, arguments: Sequence[str]) -> int:
                 "Run touched ensure before recording paths.",
             )
         touched = _validate_touched(_read_json(workspace, relative), name)
+        touched, attribution_changed = _realign_touched_attribution(
+            workspace,
+            name,
+            touched,
+        )
         paths: list[str] = []
         for index in range(3, len(arguments), 2):
             canonical_path = _safe_source_path(Path(arguments[index]).as_posix())
@@ -442,14 +507,18 @@ def execute(command: str, arguments: Sequence[str]) -> int:
 
         items = list(touched["touched"])
         review_index = next(
-            (index for index, item in enumerate(items) if item["task_id"] == "review-loop"),
+            (
+                index
+                for index, item in enumerate(items)
+                if item["task_id"] == _RESERVED_TASK_ID
+            ),
             None,
         )
         review_files = set(paths)
         if review_index is not None:
             review_files.update(items[review_index]["files"])
         review_entry = {
-            "task_id": "review-loop",
+            "task_id": _RESERVED_TASK_ID,
             "task_desc": "Review loop outputs",
             "files": sorted(review_files, key=lambda path: path.encode("utf-8")),
         }
@@ -467,7 +536,7 @@ def execute(command: str, arguments: Sequence[str]) -> int:
                 key=lambda path: path.encode("utf-8"),
             ),
         }
-        if updated != touched:
+        if attribution_changed or updated != touched:
             transaction = workspace.transaction()
             transaction.write(relative, _json_bytes(updated))
             transaction.commit()

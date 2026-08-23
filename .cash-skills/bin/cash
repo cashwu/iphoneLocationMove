@@ -89,8 +89,12 @@ def open_regular(
     return descriptor, opened
 
 
-def sha256_file(path: str) -> str:
-    descriptor, _ = open_regular(path, stat.S_IMODE(os.lstat(path).st_mode))
+def sha256_file(path: str, *, error_code: str = "bootstrap_invalid") -> str:
+    descriptor, _ = open_regular(
+        path,
+        stat.S_IMODE(os.lstat(path).st_mode),
+        error_code=error_code,
+    )
     digest = hashlib.sha256()
     try:
         while chunk := os.read(descriptor, 131072):
@@ -505,6 +509,8 @@ def validate_receipt(project_root: str, launcher_stat: os.stat_result, lock_stat
             inode = int(row[5]) if len(row) == 6 else None
         except ValueError:
             fail("receipt_invalid", "receipt identity is invalid")
+        if kind == "stable" and len(row) == 6 and (device < 0 or inode <= 0):
+            fail("receipt_invalid", "receipt identity is invalid")
         if kind == "stable" and (len(row) != 6 or device is None or inode is None):
             fail("receipt_invalid", "stable receipt record requires identity")
         if kind != "stable" and len(row) != 4:
@@ -542,6 +548,7 @@ def validate_receipt(project_root: str, launcher_stat: os.stat_result, lock_stat
 
     launcher_relative = ".cash-skills/bin/cash"
     lock_relative = ".cash-workspace.lock"
+    identity_drift: str | None = None
     for relative, opened in (
         (launcher_relative, launcher_stat),
         (lock_relative, lock_stat),
@@ -550,13 +557,12 @@ def validate_receipt(project_root: str, launcher_stat: os.stat_result, lock_stat
         if record is None or record[0] != "stable":
             fail("receipt_invalid", f"missing stable record: {relative}")
         absolute = os.path.join(project_root, relative)
-        if (
-            record[1] != sha256_file(absolute)
-            or record[2] != stat.S_IMODE(opened.st_mode)
-            or record[3] != opened.st_dev
-            or record[4] != opened.st_ino
+        if record[1] != sha256_file(absolute):
+            fail("receipt_invalid", f"stable record content drift: {relative}")
+        if identity_drift is None and (
+            record[2] != stat.S_IMODE(opened.st_mode) or record[4] != opened.st_ino
         ):
-            fail("receipt_invalid", f"stable record drift: {relative}")
+            identity_drift = relative
 
     runtime_records.sort(key=lambda item: item[0].encode("utf-8"))
     stream = "".join(
@@ -571,8 +577,27 @@ def validate_receipt(project_root: str, launcher_stat: os.stat_result, lock_stat
             mode = stat.S_IMODE(os.lstat(absolute).st_mode)
         except OSError as error:
             fail("receipt_invalid", f"{path}: {error}")
-        if f"{mode:04o}" != mode_text or sha256_file(absolute) != digest:
+        if f"{mode:04o}" != mode_text or sha256_file(
+            absolute,
+            error_code="receipt_invalid",
+        ) != digest:
+            if identity_drift is not None:
+                fail(
+                    "receipt_invalid",
+                    f"stable record identity drift: {identity_drift}; "
+                    f"runtime record drift: {path}. "
+                    "Restore that record to the content the receipt records,"
+                    " or reinstall from a trusted source, then retry",
+                )
             fail("receipt_invalid", f"runtime record drift: {path}")
+    if identity_drift is not None:
+        if not FAILURE_HINT:
+            FAILURE_HINT = (
+                "Run PYTHONPATH=.cash-skills/lib python3 -s -P -B -m cash_cli.installer"
+                " --init-receipt from the project root; "
+                "if .cash-skills/receipt.tsv is tracked by version control, untrack it first because it is machine-local identity"
+            )
+        fail("receipt_invalid", f"stable record identity drift: {identity_drift}")
     FAILURE_HINT = ""
 
 

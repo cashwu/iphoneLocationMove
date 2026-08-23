@@ -21,7 +21,7 @@ from typing import Iterable
 from .config import ConfigError, parse_cash_config, parse_openspec_config
 
 
-BUNDLE_VERSION = "2.12.0"
+BUNDLE_VERSION = "2.15.0"
 VERSION_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 MODE_RE = re.compile(r"0[0-7]{3}\Z")
@@ -89,6 +89,16 @@ APPROVED_LAUNCHER_TRANSITIONS = (
         "592345fffa009998d48008857ad903d89b0e5f0986d141a5fec26368b527c8a4",
         "76fe6dd649b1df558ef374d055ca2c5fe4c40a9200b32a1da1d41ca631c3d52f",
         "2.12.0",
+    ),
+    (
+        "76fe6dd649b1df558ef374d055ca2c5fe4c40a9200b32a1da1d41ca631c3d52f",
+        "e7457338cfd6721fcc21fbbf96fad287176ebec674be6a12fc4e9ff27542804e",
+        "2.13.0",
+    ),
+    (
+        "592345fffa009998d48008857ad903d89b0e5f0986d141a5fec26368b527c8a4",
+        "e7457338cfd6721fcc21fbbf96fad287176ebec674be6a12fc4e9ff27542804e",
+        "2.13.0",
     ),
 )
 
@@ -988,7 +998,7 @@ def report_version_controlled_receipt(target: Path) -> None:
         return
     print(
         f"{target}: {RECEIPT_PATH} is tracked by version control; it records "
-        "target-specific device and inode identity, so any copy with a "
+        "target-specific inode identity, so any copy with a "
         "different inode fails closed. Run "
         f"`git rm --cached {RECEIPT_PATH}` in that project.",
         file=sys.stderr,
@@ -1372,24 +1382,41 @@ def validate_installed_receipt(
     records: tuple[Record, ...],
 ) -> list[str]:
     conflicts: list[str] = []
+    identity_drift: str | None = None
     for parsed, expected in zip(receipt.records, records, strict=True):
         kind, path, digest, mode, device, inode = parsed
         snapshot = optional_snapshot(target, path)
         if not snapshot.exists:
             raise InstallerError(f"receipt-managed path is missing: {path}")
         actual_digest = sha256(snapshot.content or b"")
+        drifted = False
         if kind == "stable":
-            if (
-                actual_digest != digest
-                or snapshot.mode != mode
-                or snapshot.device != device
-                or snapshot.inode != inode
+            if actual_digest != digest:
+                raise InstallerError(f"stable receipt content drift: {path}")
+            if identity_drift is None and (
+                snapshot.mode != mode or snapshot.inode != inode
             ):
-                raise InstallerError(f"stable receipt identity drift: {path}")
+                identity_drift = path
         elif actual_digest != digest or snapshot.mode != mode:
-            conflicts.append(path)
+            drifted = True
         if path != expected.path:
             raise InstallerError(f"receipt path mismatch: {path}")
+        if drifted:
+            if identity_drift is not None:
+                raise InstallerError(
+                    f"stable receipt identity drift: {identity_drift} in {target}; "
+                    f"{kind} record drift: {path}. "
+                    "Restore that record to the content the receipt records,"
+                    " or reinstall from a trusted source, then retry"
+                )
+            conflicts.append(path)
+    if identity_drift is not None:
+        raise InstallerError(
+            f"stable receipt identity drift: {identity_drift} in {target}. "
+            "Run PYTHONPATH=.cash-skills/lib python3 -s -P -B -m cash_cli.installer"
+            " --init-receipt in that project; "
+            "if .cash-skills/receipt.tsv is tracked by version control, untrack it first because it is machine-local identity"
+        )
     return conflicts
 
 
