@@ -4,6 +4,41 @@ import XCTest
 
 @MainActor
 final class LocationMapModelTests: XCTestCase {
+    func testSelectingFavoriteResetsSearchOwnershipAndCreatesFreshCameraIntent() throws {
+        let model = LocationMapModel()
+        let request = try model.beginSearch(query: "舊搜尋")
+        let place = searchPlace(latitude: 25, longitude: 121, address: "公司")
+        XCTAssertEqual(model.receiveSearchResults([place], for: request), .applied)
+
+        try model.selectFavorite(place)
+
+        XCTAssertEqual(model.preview, place)
+        XCTAssertEqual(model.previewCameraIntent?.identity, model.mapSearchGeneration)
+        XCTAssertTrue(model.searchResults.isEmpty)
+        XCTAssertEqual(model.receiveSearchResults([searchPlace(latitude: 24, longitude: 120, address: "舊")], for: request), .stale)
+        let firstIdentity = try XCTUnwrap(model.previewCameraIntent?.identity)
+        try model.selectFavorite(place)
+        XCTAssertNotEqual(model.previewCameraIntent?.identity, firstIdentity)
+    }
+
+    func testSelectingFavoriteInvalidatesOlderPreviewAddressRequest() throws {
+        let model = LocationMapModel()
+        let addressRequest = try model.selectMapCoordinate(
+            coordinate(latitude: 25.01, longitude: 121.51)
+        )
+        let favorite = searchPlace(latitude: 25.02, longitude: 121.52, address: "公司")
+
+        try model.selectFavorite(favorite)
+
+        XCTAssertEqual(model.receivePreviewAddress("舊地址", for: addressRequest), .stale)
+        XCTAssertEqual(model.preview, favorite)
+    }
+
+    func testSearchGenerationExhaustionRemainsTypeLevelContract() {
+        XCTAssertThrowsError(try MapSearchGeneration(rawValue: .max).advanced()) { error in
+            XCTAssertEqual(error as? LocationMapError, .identityExhausted)
+        }
+    }
     func testDisplayedSearchResultsCanBeSelectedInSequence() throws {
         let model = LocationMapModel()
         let request = try model.beginSearch(query: "大坑")

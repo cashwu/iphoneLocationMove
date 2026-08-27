@@ -2,13 +2,14 @@
 id: ui-observation-test-no-invalidation
 type: recurring-finding
 status: open
-occurrences: 3
+occurrences: 4
 first_seen: 2026-07-27
-last_seen: 2026-07-27
+last_seen: 2026-08-27
 links:
   - openspec/changes/fix-stale-simulation-controls/reviews/propose-r1.md
   - openspec/changes/fix-map-sidebar-control-layout/reviews/propose-r1.md
   - openspec/changes/fix-map-sidebar-control-layout/reviews/apply-r2.md
+  - openspec/changes/add-favorites/reviews/apply-r6.md
 ---
 # UI observation regression test 未驗證 view invalidation
 
@@ -19,3 +20,4 @@ links:
 - 2026-07-27 — `fix-stale-simulation-controls` — `cash-propose` Round 1：原測試只驗證 shared `DeviceSetupStore.simulationStore` 變為非 `nil`，即使缺少 `@ObservedObject` 也會通過。
 - 2026-07-27 — `fix-map-sidebar-control-layout` — `cash-propose` Round 1：原布局測試規劃為每種 state 重建 fixture，無法證明同一 rendered hierarchy 在 `SimulationStore` publisher 更新後重新 layout。
 - 2026-07-27 — `fix-map-sidebar-control-layout` — `cash-apply` Round 2：paused 測試只等待 model phase，未等待同一 hosting hierarchy materialize resume probe，造成同步 flake。
+- 2026-08-27 — `add-favorites` — `cash-apply` Round 6：收藏 toggle 測試未直接驗證同一 rendered hierarchy 的可見 title 變化。

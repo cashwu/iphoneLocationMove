@@ -9,7 +9,8 @@ struct ContentView: View {
                 LocationWorkspaceView(
                     store: setupStore,
                     macLocationCoordinator:
-                        appDelegate.macLocationCoordinator
+                        appDelegate.macLocationCoordinator,
+                    favoritesStore: appDelegate.favoritesStore
                 )
             } else if let configurationFailure = appDelegate.configurationFailure {
                 VStack(spacing: 12) {
@@ -50,6 +51,7 @@ struct ContentView: View {
 struct LocationWorkspaceView: View {
     @ObservedObject var store: DeviceSetupStore
     @ObservedObject var macLocationCoordinator: MacLocationCoordinator
+    @ObservedObject var favoritesStore: FavoritesStore = FavoritesStore()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -57,7 +59,8 @@ struct LocationWorkspaceView: View {
             Divider()
             LocationMapView(
                 simulationStore: store.simulationStore,
-                macLocationCoordinator: macLocationCoordinator
+                macLocationCoordinator: macLocationCoordinator,
+                favoritesStore: favoritesStore
             )
         }
         .onAppear {

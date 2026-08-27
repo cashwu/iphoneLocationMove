@@ -47,6 +47,7 @@ private struct ResetConfirmationDialogModifier: ViewModifier {
 
 struct LocationMapView: View {
     @StateObject private var model: LocationMapModel
+    @ObservedObject private var favoritesStore: FavoritesStore
     @ObservedObject private var macLocationCoordinator: MacLocationCoordinator
     private let simulationStore: SimulationStore?
     private let presentsResetConfirmationDialog: Bool
@@ -65,16 +66,21 @@ struct LocationMapView: View {
     @State private var isResetConfirmationPresented = false
     @State private var resetConfirmationContent =
         ResetConfirmationContent.make(hasCleanupOwnership: false)
+    @State private var editingFavoriteID: UUID?
+    @State private var favoriteDraft = ""
+    @FocusState private var favoriteFieldIsFocused: Bool
 
     init(
         simulationStore: SimulationStore? = nil,
         macLocationCoordinator: MacLocationCoordinator = MacLocationCoordinator(),
         model: LocationMapModel = LocationMapModel(),
+        favoritesStore: FavoritesStore,
         initialQuery: String = "",
         initialRoundTrip: Bool = false,
         presentsResetConfirmationDialog: Bool = true
     ) {
         _model = StateObject(wrappedValue: model)
+        _favoritesStore = ObservedObject(wrappedValue: favoritesStore)
         _query = State(initialValue: initialQuery)
         _roundTrip = State(initialValue: initialRoundTrip)
         self.simulationStore = simulationStore
@@ -87,6 +93,7 @@ struct LocationMapView: View {
         simulationStore: SimulationStore? = nil,
         macLocationCoordinator: MacLocationCoordinator = MacLocationCoordinator(),
         model: LocationMapModel = LocationMapModel(),
+        favoritesStore: FavoritesStore,
         initialQuery: String = "",
         initialRoundTrip: Bool = false,
         presentsResetConfirmationDialog: Bool = true,
@@ -97,6 +104,7 @@ struct LocationMapView: View {
             simulationStore: simulationStore,
             macLocationCoordinator: macLocationCoordinator,
             model: model,
+            favoritesStore: favoritesStore,
             initialQuery: initialQuery,
             initialRoundTrip: initialRoundTrip,
             presentsResetConfirmationDialog: presentsResetConfirmationDialog
@@ -196,6 +204,7 @@ struct LocationMapView: View {
                 searchControls
                 searchResults
                 previewControls
+                favoritesControls
                 endpointControls
                 routeControls
                 if let simulationStore {
@@ -328,6 +337,36 @@ struct LocationMapView: View {
                         .font(.caption)
 
                     HStack(spacing: 8) {
+                        Button {
+                            favoritesStore.toggle(preview)
+                        } label: {
+                            Text(favoriteToggleTitle(for: preview))
+                                .accessibilityIdentifier(
+                                    "favorite-toggle-rendered-title-"
+                                        + favoriteToggleTitle(for: preview)
+                                )
+                        }
+                        .accessibilityLabel(favoriteToggleTitle(for: preview))
+                        .accessibilityIdentifier(favoriteToggleIdentifier(for: preview))
+                        .testingLayoutRegion("sidebar-button-favorite-toggle")
+                        .background {
+                            #if DEBUG
+                            TestingActionMarker(
+                                identifier: favoritesStore.isFavorite(preview.coordinate)
+                                    ? "favorite-toggle-remove-action"
+                                    : "favorite-toggle-add-action",
+                                isEnabled: true
+                            ) {
+                                favoritesStore.toggle(preview)
+                            }
+                            .frame(width: 0, height: 0)
+                            .allowsHitTesting(false)
+                            #endif
+                        }
+                        FavoriteToggleAccessibilityView(
+                            title: favoriteToggleTitle(for: preview)
+                        )
+                        .frame(width: 1, height: 1)
                         Button("設為 A") {
                             assignPreview(to: .a)
                         }
@@ -342,6 +381,130 @@ struct LocationMapView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+    }
+
+    @ViewBuilder
+    private var favoritesControls: some View {
+        if !favoritesStore.favorites.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("我的最愛")
+                    .font(.headline)
+                ForEach(favoritesStore.favorites) { favorite in
+                    favoriteRow(favorite)
+                }
+            }
+            .testingLayoutRegion("sidebar-favorites-list")
+        }
+    }
+
+    private func favoriteRow(_ favorite: FavoritePlace) -> some View {
+        Group {
+            if editingFavoriteID == favorite.id {
+                TextField("名稱", text: $favoriteDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("favorite-name-editor-\(favorite.id.uuidString)")
+                    .focused($favoriteFieldIsFocused)
+                    .onSubmit {
+                        favoritesStore.rename(id: favorite.id, to: favoriteDraft)
+                        editingFavoriteID = nil
+                        favoriteFieldIsFocused = false
+                    }
+                    .onExitCommand {
+                        editingFavoriteID = nil
+                        favoriteFieldIsFocused = false
+                    }
+                    .onChange(of: favoriteFieldIsFocused) { focused in
+                        if !focused, editingFavoriteID == favorite.id {
+                            editingFavoriteID = nil
+                        }
+                    }
+                    .background {
+                        #if DEBUG
+                        ZStack {
+                            TestingActionMarker(identifier: "favorite-submit-rename-action-\(favorite.id.uuidString)", isEnabled: true) {
+                                favoritesStore.rename(id: favorite.id, to: "辦公室")
+                                editingFavoriteID = nil
+                            }
+                            TestingActionMarker(identifier: "favorite-submit-blank-rename-action-\(favorite.id.uuidString)", isEnabled: true) {
+                                favoritesStore.rename(id: favorite.id, to: "   ")
+                                editingFavoriteID = nil
+                            }
+                        }
+                        .frame(width: 0, height: 0)
+                        .allowsHitTesting(false)
+                        #endif
+                    }
+            } else {
+                Button {
+                    selectFavorite(favorite)
+                } label: {
+                    Text(favorite.name)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .testingLayoutRegion("favorite-row-name-\(favorite.name)")
+                }
+                .buttonStyle(.plain)
+                .background {
+                    #if DEBUG
+                    ZStack {
+                        TestingActionMarker(identifier: "favorite-selection-action-\(favorite.id.uuidString)", isEnabled: true) {
+                            selectFavorite(favorite)
+                        }
+                        TestingActionMarker(identifier: "favorite-rename-action-\(favorite.id.uuidString)", isEnabled: true) {
+                            beginFavoriteRename(favorite)
+                        }
+                        TestingActionMarker(identifier: "favorite-blank-rename-action-\(favorite.id.uuidString)", isEnabled: true) {
+                            beginFavoriteRename(favorite)
+                        }
+                        TestingActionMarker(identifier: "favorite-delete-action-\(favorite.id.uuidString)", isEnabled: true) {
+                            favoritesStore.remove(id: favorite.id)
+                        }
+                    }
+                    .frame(width: 0, height: 0)
+                    .allowsHitTesting(false)
+                    #endif
+                }
+                .contextMenu {
+                    Button("重新命名") {
+                        beginFavoriteRename(favorite)
+                    }
+                    Button("刪除", role: .destructive) {
+                        favoritesStore.remove(id: favorite.id)
+                    }
+                }
+            }
+        }
+    }
+
+    private func selectFavorite(_ favorite: FavoritePlace) {
+        do {
+            try model.selectFavorite(
+                MapSearchPlace(
+                    coordinate: favorite.coordinate,
+                    address: favorite.address
+                )
+            )
+            cancelSearch()
+            cancelPreviewAddressLookup()
+            searchRequest = nil
+            message = nil
+        } catch {
+            show(error)
+        }
+    }
+
+    private func beginFavoriteRename(_ favorite: FavoritePlace) {
+        favoriteDraft = favorite.name
+        editingFavoriteID = favorite.id
+        favoriteFieldIsFocused = true
+    }
+
+    private func favoriteToggleIdentifier(for preview: MapSearchPlace) -> String {
+        "favorite-toggle-label-"
+            + favoriteToggleTitle(for: preview)
+    }
+
+    private func favoriteToggleTitle(for preview: MapSearchPlace) -> String {
+        favoritesStore.isFavorite(preview.coordinate) ? "取消最愛" : "加入最愛"
     }
 
     private var endpointControls: some View {
@@ -1309,6 +1472,24 @@ private struct AccessibilityIdentifierMarker: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {
         nsView.setAccessibilityIdentifier(identifier)
+    }
+}
+
+private struct FavoriteToggleAccessibilityView: NSViewRepresentable {
+    let title: String
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSButton()
+        view.title = title
+        view.isBordered = false
+        view.isEnabled = false
+        view.setAccessibilityElement(true)
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        guard let button = view as? NSButton else { return }
+        button.title = title
     }
 }
 

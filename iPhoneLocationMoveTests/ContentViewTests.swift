@@ -30,6 +30,160 @@ final class ContentViewTests: XCTestCase {
         attachSnapshot(of: hostingView, name: "sidebar-disconnected")
     }
 
+    func testFavoriteToggleUpdatesTheRenderedHierarchy() async throws {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        let favoritesStore = FavoritesStore(defaults: defaults)
+        let model = LocationMapModel()
+        _ = try model.selectMapCoordinate(
+            MapCoordinate(latitude: 25.033964, longitude: 121.564468)
+        )
+        let (hostingView, window) = makeMapHostingView(
+            model: model,
+            favoritesStore: favoritesStore
+        )
+        defer { removeFromWindow(window) }
+
+        await waitForViewUpdate(hostingView)
+        XCTAssertTrue(hasButtonTitle("加入最愛", in: hostingView))
+        let addToggle = try XCTUnwrap(
+            findButton(in: hostingView, identifier: "favorite-toggle-add-action")
+        )
+        XCTAssertTrue(hasIdentifier("sidebar-button-favorite-toggle", in: hostingView))
+        addToggle.performClick(nil)
+        await waitForViewUpdate(hostingView)
+        XCTAssertEqual(favoritesStore.favorites.count, 1)
+        XCTAssertTrue(hasButtonTitle("取消最愛", in: hostingView))
+        let removeToggle = try XCTUnwrap(
+            findButton(in: hostingView, identifier: "favorite-toggle-remove-action")
+        )
+        removeToggle.performClick(nil)
+        await waitForViewUpdate(hostingView)
+        XCTAssertTrue(favoritesStore.favorites.isEmpty)
+        XCTAssertTrue(hasButtonTitle("加入最愛", in: hostingView))
+        XCTAssertTrue(hasIdentifier("sidebar-button-favorite-toggle", in: hostingView))
+    }
+
+    func testFavoriteRowSelectionUsesModelOwnershipBeforeViewCancellation() async throws {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        let favoritesStore = FavoritesStore(defaults: defaults)
+        let favorite = try searchPlace(latitude: 25, longitude: 121, address: "公司")
+        favoritesStore.toggle(favorite)
+        let model = LocationMapModel()
+        let oldRequest = try model.beginSearch(query: "舊搜尋")
+        var searchCancellations = 0
+        var addressCancellations = 0
+        let (hostingView, window) = makeMapHostingView(
+            model: model,
+            favoritesStore: favoritesStore,
+            onSearchCancellationRequested: { searchCancellations += 1 },
+            onPreviewAddressCancellationRequested: { addressCancellations += 1 }
+        )
+        defer { removeFromWindow(window) }
+
+        await waitForViewUpdate(hostingView)
+        let action = try XCTUnwrap(
+            findButton(
+                in: hostingView,
+                identifier: "favorite-selection-action-\(favoritesStore.favorites[0].id.uuidString)"
+            )
+        )
+        let mapView = try XCTUnwrap(findMapView(in: hostingView))
+        action.performClick(nil)
+        await waitForViewUpdate(hostingView)
+
+        XCTAssertEqual(model.preview?.address, "公司")
+        XCTAssertTrue(model.searchResults.isEmpty)
+        XCTAssertEqual(model.receiveSearchResults([favorite], for: oldRequest), .stale)
+        XCTAssertEqual(searchCancellations, 1)
+        XCTAssertEqual(addressCancellations, 1)
+        try await waitForMapCenter(favorite.coordinate, in: mapView)
+    }
+
+    func testFavoriteMutationAndWorkspaceResetRemainIndependentInSameHierarchy() async throws {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        let favoritesStore = FavoritesStore(defaults: defaults)
+        let first = try searchPlace(latitude: 25, longitude: 121, address: "公司")
+        let second = try searchPlace(latitude: 24, longitude: 120, address: "家")
+        favoritesStore.toggle(first)
+        favoritesStore.toggle(second)
+        let model = LocationMapModel()
+        _ = try model.selectMapCoordinate(first.coordinate)
+        let (hostingView, window) = makeMapHostingView(
+            model: model,
+            favoritesStore: favoritesStore
+        )
+        defer { removeFromWindow(window) }
+
+        await waitForViewUpdate(hostingView)
+        let firstID = try XCTUnwrap(favoritesStore.favorites.first?.id)
+        favoritesStore.rename(id: firstID, to: "  辦公室  ")
+        favoritesStore.remove(id: firstID)
+        try model.resetWorkspace()
+        await waitForViewUpdate(hostingView)
+
+        XCTAssertNil(model.preview)
+        XCTAssertEqual(favoritesStore.favorites.map(\.name), ["家"])
+        XCTAssertTrue(hasIdentifier("sidebar-favorites-list", in: hostingView))
+    }
+
+    func testFavoriteRenameBlankRenameAndDeleteStayObservableInSameHierarchy() async throws {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        let favoritesStore = FavoritesStore(defaults: defaults)
+        let favorite = try searchPlace(latitude: 25, longitude: 121, address: "公司")
+        favoritesStore.toggle(favorite)
+        let model = LocationMapModel()
+        _ = try model.selectMapCoordinate(favorite.coordinate)
+        let simulationStore = makeSimulationStore(device: ResetTestSimulationDevice())
+        await simulationStore.confirmPoint(
+            try DeviceCoordinate(latitude: 25, longitude: 121),
+            riskAccepted: true
+        )
+        let stateBeforeDelete = simulationStore.state
+        let (hostingView, window) = makeMapHostingView(
+            simulationStore: simulationStore,
+            model: model,
+            favoritesStore: favoritesStore
+        )
+        defer { removeFromWindow(window) }
+
+        await waitForViewUpdate(hostingView)
+        let mapView = try XCTUnwrap(findMapView(in: hostingView))
+        let previewAnnotation = try await waitForPreviewMarker(
+            at: favorite.coordinate,
+            in: mapView
+        )
+        let id = try XCTUnwrap(favoritesStore.favorites.first?.id.uuidString)
+        let rename = try XCTUnwrap(findButton(in: hostingView, identifier: "favorite-rename-action-\(id)"))
+        rename.performClick(nil)
+        await waitForViewUpdate(hostingView)
+        let submitRename = try XCTUnwrap(findButton(in: hostingView, identifier: "favorite-submit-rename-action-\(id)"))
+        submitRename.performClick(nil)
+        await waitForViewUpdate(hostingView)
+        XCTAssertEqual(favoritesStore.favorites.first?.name, "辦公室")
+        XCTAssertTrue(hasIdentifier("favorite-row-name-辦公室", in: hostingView))
+        let blank = try XCTUnwrap(findButton(in: hostingView, identifier: "favorite-blank-rename-action-\(id)"))
+        blank.performClick(nil)
+        await waitForViewUpdate(hostingView)
+        let submitBlank = try XCTUnwrap(findButton(in: hostingView, identifier: "favorite-submit-blank-rename-action-\(id)"))
+        submitBlank.performClick(nil)
+        await waitForViewUpdate(hostingView)
+        XCTAssertEqual(favoritesStore.favorites.first?.name, "辦公室")
+        XCTAssertTrue(hasIdentifier("favorite-row-name-辦公室", in: hostingView))
+        let delete = try XCTUnwrap(findButton(in: hostingView, identifier: "favorite-delete-action-\(id)"))
+        delete.performClick(nil)
+        await waitForViewUpdate(hostingView)
+        XCTAssertTrue(favoritesStore.favorites.isEmpty)
+        XCTAssertEqual(model.preview?.coordinate, favorite.coordinate)
+        XCTAssertTrue(mapView.annotations.contains { $0 === previewAnnotation })
+        XCTAssertEqual(previewAnnotation.coordinate.latitude, favorite.coordinate.latitude)
+        XCTAssertEqual(previewAnnotation.coordinate.longitude, favorite.coordinate.longitude)
+        XCTAssertEqual(simulationStore.state, stateBeforeDelete)
+    }
+
     func testConnectedSidebarRelayoutsObservedSimulationStates() async throws {
         let device = ResetTestSimulationDevice()
         let store = makeSimulationStore(device: device)
@@ -641,7 +795,8 @@ final class ContentViewTests: XCTestCase {
                 store: store,
                 macLocationCoordinator: MacLocationCoordinator(
                     provider: ContentViewMacLocationProvider()
-                )
+                ),
+                favoritesStore: FavoritesStore()
             )
         )
         let window = NSWindow(
@@ -687,6 +842,7 @@ final class ContentViewTests: XCTestCase {
     private func makeMapHostingView(
         simulationStore: SimulationStore? = nil,
         model: LocationMapModel = LocationMapModel(),
+        favoritesStore: FavoritesStore = FavoritesStore(),
         initialQuery: String = "",
         initialRoundTrip: Bool = false,
         onSearchCancellationRequested: @escaping () -> Void = {},
@@ -699,6 +855,7 @@ final class ContentViewTests: XCTestCase {
                     provider: ContentViewMacLocationProvider()
                 ),
                 model: model,
+                favoritesStore: favoritesStore,
                 initialQuery: initialQuery,
                 initialRoundTrip: initialRoundTrip,
                 presentsResetConfirmationDialog: false,
@@ -863,6 +1020,13 @@ final class ContentViewTests: XCTestCase {
         return root.subviews.lazy.compactMap {
             self.findButton(in: $0, identifier: identifier)
         }.first
+    }
+
+    private func hasButtonTitle(_ title: String, in root: NSView) -> Bool {
+        if let button = root as? NSButton, button.title == title {
+            return true
+        }
+        return root.subviews.contains(where: { hasButtonTitle(title, in: $0) })
     }
 
     private func allSubviews(in root: NSView) -> [NSView] {

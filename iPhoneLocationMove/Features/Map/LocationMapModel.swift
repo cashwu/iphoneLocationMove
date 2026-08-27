@@ -327,6 +327,18 @@ final class LocationMapModel: ObservableObject {
         activeSearchRequest = nil
     }
 
+    func selectFavorite(_ place: MapSearchPlace) throws {
+        recordUserMapContext()
+        try advanceSearchOwnership()
+        preview = place
+        previewCameraIntent = MapPreviewCameraIntent(
+            coordinate: place.coordinate,
+            identity: mapSearchGeneration
+        )
+        searchResults = []
+        activeSearchRequest = nil
+    }
+
     @discardableResult
     func selectMapCoordinate(
         _ coordinate: MapCoordinate
