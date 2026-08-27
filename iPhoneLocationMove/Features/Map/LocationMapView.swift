@@ -363,10 +363,6 @@ struct LocationMapView: View {
                             .allowsHitTesting(false)
                             #endif
                         }
-                        FavoriteToggleAccessibilityView(
-                            title: favoriteToggleTitle(for: preview)
-                        )
-                        .frame(width: 1, height: 1)
                         Button("設為 A") {
                             assignPreview(to: .a)
                         }
@@ -377,6 +373,12 @@ struct LocationMapView: View {
                         .testingLayoutRegion("sidebar-button-endpoint-b")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .overlay(alignment: .topLeading) {
+                        FavoriteToggleAccessibilityView(
+                            title: favoriteToggleTitle(for: preview)
+                        )
+                        .frame(width: 1, height: 1)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -1483,6 +1485,7 @@ private struct FavoriteToggleAccessibilityView: NSViewRepresentable {
         view.title = title
         view.isBordered = false
         view.isEnabled = false
+        view.alphaValue = 0
         view.setAccessibilityElement(true)
         return view
     }

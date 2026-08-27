@@ -71,7 +71,8 @@ final class FavoritesStoreTests: XCTestCase {
     }
 
     func testWriteFailureDoesNotChangeMemoryState() throws {
-        let defaults = DiscardingUserDefaults()
+        let defaults = DiscardingUserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
         let store = FavoritesStore(defaults: defaults)
         let place = MapSearchPlace(
             coordinate: try MapCoordinate(latitude: 25, longitude: 121),
