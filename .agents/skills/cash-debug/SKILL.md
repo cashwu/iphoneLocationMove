@@ -89,17 +89,26 @@ Ask these questions:
 - Does your theory explain ALL the symptoms, not just some?
 - Can you construct a test case that proves the root cause?
 
+**Record the verification evidence carrier.** Before leaving Phase 3, write into your debug notes exactly one primary verification target, the related regression targets, the success marker, and — when a red phase applies — the failure marker, or `N/A` with a pure-refactor or remaining-task classification reason. These notes are this workflow's evidence carrier; `cash-debug` does not run inside a Cash task loop and MUST NOT assume a `tasks.md` contract exists.
+
 ---
 
 ## Phase 4: Fix
 
 Now — and only now — fix the bug.
 
-1. **Write a failing test** that reproduces the bug. If `tdd: true` is set in `.cash.yaml`, fetch TDD instructions via `"$cash_cli" instructions --skill tdd` and follow the Red-Green-Refactor cycle
-2. **Make the minimum change** to fix the root cause — not the symptoms
-3. **Run the test** — confirm it passes
-4. **Run the full test suite** — ensure no regressions
-5. **Check related code** — if this pattern exists elsewhere, fix those too
+Read `.cash.yaml` in the project root first. If `tdd: true` is set, fetch TDD instructions by running `"$cash_cli" instructions --skill tdd`, then follow the returned `instruction`, consuming the Phase 3 notes as its named targets and markers. If `tdd: false` is set, do not force a fail-first ordering.
+
+Regardless of the `tdd` value, when the fix will add or modify any test, fetch test-quality instructions by running `"$cash_cli" instructions --skill test-quality` before the first test edit, then follow the returned `instruction`.
+
+The numbered order below is the `tdd: false` sequence. Under `tdd: true` the fetched `instruction` owns the ordering: when it classifies this bug as a red-phase branch, run the Phase 3 primary verification target and observe its failure marker before any production edit, then follow the numbered steps from step 1.
+
+1. **Make the minimum change** to fix the root cause — not the symptoms
+2. **Run the Phase 3 primary verification target** — confirm its success marker appears
+3. **Run the Phase 3 regression targets** — ensure no regressions
+4. **Check related code** — if this pattern exists elsewhere, fix those too
+
+Both `tdd` values require root-cause analysis first, a minimum root-cause fix, a named primary verification target, and the related regression targets. When no practical automated test boundary exists, use the CLI, analyzer, or manual assertion that suits the problem.
 
 ---
 
@@ -107,7 +116,7 @@ Now — and only now — fix the bug.
 
 - **Don't guess** — Every change must be based on evidence
 - **Don't fix symptoms** — Find and fix the root cause
-- **Don't skip the test** — Phase 4 always starts with a failing test
+- **Don't skip verification** — every fix runs the Phase 3 primary verification target and the related regression targets
 - **Don't power through** — After 3 failed attempts, stop and reassess
 - **Do keep notes** — Document what you tried, what you found, what you ruled out
 - **Do check broadly** — A bug in one place often means the same bug exists elsewhere

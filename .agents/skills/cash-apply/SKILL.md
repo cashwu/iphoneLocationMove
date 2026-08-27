@@ -170,12 +170,19 @@ The trigger is guidance only — it MUST NOT block apply from proceeding when th
 
 5. **Check project preferences**
 
-   Read `.cash.yaml` in the project root.
-   If `tdd: true` is set, apply TDD discipline throughout implementation:
+   Resolve the effective TDD setting before reading the remaining project preferences:
+   - Find the first unindented line whose prefix is exactly `tdd:` in `openspec/changes/<change>/.openspec.yaml`; never scan later `tdd:` lines after finding it. If its entire suffix is exactly ` true` or ` false`, use that lowercase value as the change-level `tdd` value and set the source to `change-level`.
+   - If the file has no unindented `tdd:` line, fall back to the project root `.cash.yaml` `tdd` value and set the source to `global`.
+   - Any other suffix, including no space or a tab after the colon, is invalid. Print a warning containing the actual invalid suffix, then fall back to the project root `.cash.yaml` and set the source to `global`. Do not silently accept malformed values or inspect a later `tdd:` line.
+
+   If the effective `tdd` value is `true`, apply TDD discipline throughout implementation:
    - Fetch TDD instructions by running `"$cash_cli" instructions --skill tdd`, then follow the returned `instruction`
 
-   If `tdd: false` is set, do not apply TDD ordering.
+   If the effective `tdd` value is `false`, do not apply TDD ordering.
 
+   Regardless of the effective `tdd` value, when a task will add or modify any test, fetch test-quality instructions by running `"$cash_cli" instructions --skill test-quality` before the first test edit, then follow the returned `instruction`. When no test is added or modified, do not fetch it and do not add a test for form's sake.
+
+   Read `.cash.yaml` in the project root for the remaining preferences.
    If `audit: true` is set, apply sharp-edges discipline throughout implementation:
    - When designing APIs or interfaces, evaluate through 3 adversary lenses (Scoundrel, Lazy Developer, Confused Developer)
    - When adding configuration options, verify defaults are secure and zero/empty values are safe
@@ -188,6 +195,7 @@ The trigger is guidance only — it MUST NOT block apply from proceeding when th
 
    Display:
    - Schema being used
+   - Effective TDD value and source, formatted as `TDD: on（change-level）`, `TDD: off（change-level）`, `TDD: on（global）`, or `TDD: off（global）`
    - Progress: "N/M tasks complete"
    - Remaining tasks overview
    - Dynamic instruction from CLI
@@ -205,6 +213,7 @@ The trigger is guidance only — it MUST NOT block apply from proceeding when th
      - is vague ("handle edge cases", "wire it up", "make it work");
      - conflicts with the implementation contract (asks for behavior the contract excludes, or omits behavior the contract requires).
        When this happens, pause. Either update the artifact (design or tasks) so the task names a concrete behavior and verification target, or report the blocker and wait for guidance. Do NOT silently guess against unclear requirements.
+   - **Map the task's evidence fields before editing any source file.** Every pending task's checkbox description MUST carry non-empty `delivery`, `verification`, `regression`, `success`, and `red` fields, and they map onto the canonical discipline as primary target, regression targets, success marker, and failure marker. `verification` names exactly one primary target; `regression` names the related regression targets, or is `N/A` with a reason showing that primary target already covers the full related scope; `success` describes only the marker directly observable from that primary target and MUST NOT mix in regression, publication, or task completion results; `red` is `N/A` with a pure-refactor or remaining-task classification reason when no red phase applies. If any field is missing, holds a placeholder, or — when the effective `tdd` value is `true` — the `red` field contradicts the canonical TDD classification, take the existing unclear-task branch before any production edit: do not guess, do not write production code, and do not call `task done`.
    - Before writing code, re-read and understand the task, relevant spec, Implementation Contract, and actual call flow. A candidate is eligible only when it preserves observable behavior, interface／data shape, failure modes, acceptance criteria, trust-boundary validation, data-loss prevention, security, and accessibility. A pending task that conflicts with or is unclear against the contract MUST enter the existing unclear-task／blocker triage; MUST NOT use YAGNI to mark it complete or silently skip it.
    - Apply this ordered minimal-solution ladder and stop at the first eligible rung. If an earlier rung does not satisfy the contract, exclude it and continue:
      1. `reuse` — use an existing codebase helper, type, module, or established pattern.
@@ -223,7 +232,7 @@ The trigger is guidance only — it MUST NOT block apply from proceeding when th
         - The examples are not a closed input set.
    - Make the code changes required
    - Keep changes minimal and focused
-   - **Verify before marking done** — re-read the task description from the tasks file AND the relevant Implementation Contract content from design.md. For each requirement stated in the task description and each contract item that covers this task's scope, confirm it is addressed by your changes. Before calling `task done`, require verification evidence appropriate to the task: its named test, CLI, analyzer, or manual assertion must pass. If any contract item, task requirement, or verification target is missing or failing, implement/fix it now. Do not mark the task complete until every part of the description is covered and the contract for this task is satisfied.
+   - **Verify before marking done** — re-read the task description from the tasks file AND the relevant Implementation Contract content from design.md. For each requirement stated in the task description and each contract item that covers this task's scope, confirm it is addressed by your changes. Before calling `task done`, require verification evidence appropriate to the task: its named test, CLI, analyzer, or manual assertion must pass. After that primary target passes, run the targets named in the task's `regression` field; when that field is `N/A`, confirm its stated reason still holds. If any contract item, task requirement, or verification target is missing or failing, implement/fix it now. Do not mark the task complete until every part of the description is covered and the contract for this task is satisfied.
    - Mark task complete by running: `"$cash_cli" task done --change "<name>" <task-id>`
      This command marks the checkbox in tasks.md AND records which files were modified for this task.
    - Continue to next task
@@ -588,6 +597,17 @@ The trigger is guidance only — it MUST NOT block apply from proceeding when th
    - 寫入 signals 後，record every signal file this step created or updated。將路徑轉為 project-root-relative，濾除所有 `openspec/changes/` 下的路徑；若濾除後為空，不呼叫 Cash CLI 且不產生警告。否則先執行 `"$cash_cli" touched ensure "<change-name>"`，再以所有候選路徑執行 `"$cash_cli" touched record "<change-name>" --path <path>`；整批失敗時逐路徑重試，以記錄最大合法子集。`touched ensure` 或 `touched record` 失敗時印出警告並繼續，不使 workflow 失敗，也不改變任何 round file 的 `decision`；警告須列出未能記錄的路徑與 `error.code`，並 carry this warning into the final completion output。
    - **Failure handling**: If writing under `openspec/signals/` fails, print a warning but do NOT fail the cash workflow — signals are an auxiliary layer. If there are no qualifying findings, write nothing.
 <!-- REVIEW-GATE:END -->
+
+12. **Summarize this apply loop run**
+
+   After the review loop ends with `passed` or `aborted`, and after the final ledger row and signals write step are complete, add the loop summary to the gate-complete or abort final response.
+
+   - Use the main agent's records for this run as the authority. Let N be the number of round files written in this run, counted by position within the run rather than by their global file numbers. Let M be the sum of `fixed_files` from those rounds.
+   - Read `openspec/changes/<change>/reviews/loop-ledger.tsv` only to verify that its trailing apply rows match this run's recorded rounds. The ledger cannot identify a run by itself because its schema has no run identifier and `(skill, round)` is not unique.
+   - Report exactly one summary line using this format: `apply 迴圈：本次 N 輪，修復檔案數合計 M`（replace N and M with their values）.
+   - If N is 4 or more, also report: `設計劣化警訊：本次 apply 迴圈達 4 輪以上，建議檢視 design.md 或以 cash-ingest workflow 更新設計。` If N is 3 or less, do not report this warning.
+   - If the ledger is missing, unreadable, or its trailing apply rows do not match this run's records, print a warning with the mismatch details and still report the summary from the main agent's records.
+   - This step is read-only. It MUST NOT modify any round file's `decision`, fail the workflow, or appear in cash-propose.
 
 **Output During Implementation**
 

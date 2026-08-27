@@ -106,6 +106,18 @@ If no argument is provided, the workflow will extract requirements from conversa
 
    If a change with that name already exists, suggest continuing the existing change instead of creating a new one.
 
+4b. **Record this change's TDD choice**
+
+   After a new change succeeds, or at the same point when continuing an existing change, read `openspec/changes/<name>/.openspec.yaml` before writing the proposal.
+
+   - If an unindented `tdd:` line already exists, skip this question and do not append another line. This is the mechanical once-per-change check for both new and continue paths.
+   - If the line is absent, use the **AskUserQuestion tool** to ask whether this change should use TDD. Offer exactly two choices:
+     - **Use TDD** — recommended for behavior changes or large scope; record `true`.
+     - **Do not use TDD** — recommended for documentation, metadata, or small behavior-preserving refactors; record `false`.
+   - The existing Guardrails interaction fallback applies to this question.
+   - After the user answers, append exactly one unindented line: `tdd: true` or `tdd: false`, terminated by LF. If `.openspec.yaml` is non-empty and does not end with LF, write exactly one LF separator before the new line so the existing tail and the new key cannot merge. Preserve the content of every existing line and do not modify `.cash.yaml`.
+   - If the append fails, report the exact write error and stop the workflow. Do not continue to proposal authoring with an unrecorded choice.
+
 5. **Write the proposal**
 
    **IMPORTANT — file path rules for the `## Impact` section:**
