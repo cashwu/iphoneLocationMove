@@ -187,24 +187,43 @@ final class ContentViewTests: XCTestCase {
     func testFavoritesListNeverPushesDeviceControlsOutOfTheSidebar() async throws {
         // The sidebar clears 620pt by only ~22pt, so an unbounded favourites
         // list used to push 設定位置 below the fold from the very first entry.
+        let empty = try await favoritesList(favoriteCount: 0)
         let capped = try await favoritesList(favoriteCount: 20)
         let atLimit = try await favoritesList(favoriteCount: 6)
         let belowLimit = try await favoritesList(favoriteCount: 3)
 
+        XCTAssertEqual(
+            capped.setLocationMinY,
+            empty.setLocationMinY,
+            accuracy: 0.5
+        )
         // Past the visible-row limit the section stops growing…
-        XCTAssertEqual(capped.height, atLimit.height, accuracy: 0.5)
+        XCTAssertEqual(
+            try XCTUnwrap(capped.height),
+            try XCTUnwrap(atLimit.height),
+            accuracy: 0.5
+        )
         // …and the rows stay reachable through a real scroller rather than
         // being clipped away.
         XCTAssertTrue(capped.scrollableRows)
+        XCTAssertTrue(capped.lastRowVisibleAfterScrolling)
         XCTAssertFalse(belowLimit.scrollableRows)
         // …and below the limit the section still shrinks to its rows rather
         // than reserving the capped height.
-        XCTAssertLessThan(belowLimit.height, atLimit.height - 0.5)
+        XCTAssertLessThan(
+            try XCTUnwrap(belowLimit.height),
+            try XCTUnwrap(atLimit.height) - 0.5
+        )
     }
 
     private func favoritesList(
         favoriteCount: Int
-    ) async throws -> (height: CGFloat, scrollableRows: Bool) {
+    ) async throws -> (
+        height: CGFloat?,
+        setLocationMinY: CGFloat,
+        scrollableRows: Bool,
+        lastRowVisibleAfterScrolling: Bool
+    ) {
         let suite = "iPhoneLocationMoveTests-favorites-cap-\(favoriteCount)"
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
@@ -234,11 +253,37 @@ final class ContentViewTests: XCTestCase {
         await waitForViewUpdate(hostingView)
         try assertSidebarLayout(
             in: hostingView,
-            requiredRegions: ["sidebar-favorites-list"],
+            requiredRegions: favoriteCount == 0 ? [] : ["sidebar-favorites-list"],
             requiredPrimaryButtonIdentifiers: ["sidebar-button-set-location"]
         )
         let regions = allSubviews(in: hostingView)
             .compactMap { $0 as? TestingLayoutRegionView }
+        let setLocation = try XCTUnwrap(
+            regions.first {
+                $0.accessibilityIdentifier() == "sidebar-button-set-location"
+            }
+        )
+        let setLocationFrame = setLocation.convert(setLocation.bounds, to: hostingView)
+        let sidebarBounds = NSRect(
+            x: 0,
+            y: 0,
+            width: 320,
+            height: hostingView.bounds.height
+        )
+        XCTAssertGreaterThanOrEqual(
+            setLocationFrame.minY,
+            sidebarBounds.minY - 1,
+            "set location is clipped below the sidebar"
+        )
+        XCTAssertLessThanOrEqual(
+            setLocationFrame.maxY,
+            sidebarBounds.maxY + 1,
+            "set location is clipped above the sidebar"
+        )
+        guard favoriteCount > 0 else {
+            return (nil, setLocationFrame.minY, false, true)
+        }
+
         let list = try XCTUnwrap(
             regions.first {
                 $0.accessibilityIdentifier() == "sidebar-favorites-list"
@@ -248,15 +293,42 @@ final class ContentViewTests: XCTestCase {
         // a clipped stack renders all of them too. Require a real scroller
         // whose content outgrows its clip view.
         let listFrame = list.convert(list.bounds, to: hostingView)
-        let scrollableRows = allSubviews(in: hostingView)
+        let rowScrollView = allSubviews(in: hostingView)
             .compactMap { $0 as? NSScrollView }
-            .contains {
+            .first {
                 let frame = $0.convert($0.bounds, to: hostingView)
                 return listFrame.contains(frame.origin)
                     && ($0.documentView?.bounds.height ?? 0)
                         > $0.contentView.bounds.height
             }
-        return (listFrame.height, scrollableRows)
+        var lastRowVisibleAfterScrolling = favoriteCount <= 5
+        if let rowScrollView,
+           let documentView = rowScrollView.documentView,
+           let lastFavorite = favoritesStore.favorites.last,
+           let lastRow = regions.first(where: {
+               $0.accessibilityIdentifier()
+                   == "favorite-row-name-\(lastFavorite.name)"
+           })
+        {
+            let bottomY = max(
+                documentView.bounds.minY,
+                documentView.bounds.maxY - rowScrollView.contentView.bounds.height
+            )
+            rowScrollView.contentView.scroll(to: NSPoint(x: 0, y: bottomY))
+            rowScrollView.reflectScrolledClipView(rowScrollView.contentView)
+            let lastRowFrame = lastRow.convert(
+                lastRow.bounds,
+                to: rowScrollView.contentView
+            )
+            lastRowVisibleAfterScrolling = rowScrollView.contentView.bounds
+                .contains(lastRowFrame.origin)
+        }
+        return (
+            listFrame.height,
+            setLocationFrame.minY,
+            rowScrollView != nil,
+            lastRowVisibleAfterScrolling
+        )
     }
 
     func testConnectedSidebarRelayoutsObservedSimulationStates() async throws {

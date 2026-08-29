@@ -914,6 +914,31 @@ enum PymobiledeviceFailureSummary {
     /// detail so a long exception cannot push the lock or authorization
     /// marker past the display limit; only the message shown to the user is
     /// truncated.
+    static func failureIfReported(
+        standardError: String,
+        standardOutput: String,
+        exitCode: Int32,
+        stage: DevicePrerequisiteStage
+    ) -> DeviceLocationError? {
+        let summaries = [standardError, standardOutput].compactMap(streamSummary)
+        if summaries.contains(where: isDeviceLockedFailure) {
+            return .deviceLocked
+        }
+        if stage == .trust,
+           summaries.contains(where: isAuthorizationFailure) {
+            return .authorizationDenied
+        }
+        guard exitCode != 0 else {
+            return nil
+        }
+        return classify(
+            standardError: standardError,
+            standardOutput: standardOutput,
+            exitCode: exitCode,
+            stage: stage
+        )
+    }
+
     static func classify(
         standardError: String,
         standardOutput: String,
@@ -982,6 +1007,7 @@ enum PymobiledeviceFailureSummary {
             || normalized.contains("device is locked")
             || normalized.contains("passwordrequired")
             || normalized.contains("passwordprotected")
+            || normalized.contains("password protected")
     }
 
     static func isAuthorizationFailure(_ detail: String) -> Bool {
@@ -1254,13 +1280,13 @@ private actor LivePymobiledeviceBoundary: PymobiledeviceBoundary {
                 "Unable to launch pymobiledevice3: \(error.localizedDescription)"
             )
         }
-        guard output.exitCode == 0 else {
-            throw PymobiledeviceFailureSummary.classify(
-                standardError: output.standardError,
-                standardOutput: output.standardOutput,
-                exitCode: output.exitCode,
-                stage: stage
-            )
+        if let failure = PymobiledeviceFailureSummary.failureIfReported(
+            standardError: output.standardError,
+            standardOutput: output.standardOutput,
+            exitCode: output.exitCode,
+            stage: stage
+        ) {
+            throw failure
         }
         return output
     }

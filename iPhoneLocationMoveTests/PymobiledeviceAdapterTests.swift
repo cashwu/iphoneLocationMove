@@ -1514,6 +1514,28 @@ final class PymobiledeviceFailureSummaryTests: XCTestCase {
         XCTAssertEqual(failure, .deviceLocked)
     }
 
+    func testZeroExitTrustLockDiagnosticIsStillReportedAsFailure() {
+        let failure = PymobiledeviceFailureSummary.failureIfReported(
+            standardError: "Device is password protected. Please unlock and retry",
+            standardOutput: "",
+            exitCode: 0,
+            stage: .trust
+        )
+
+        XCTAssertEqual(failure, .deviceLocked)
+    }
+
+    func testZeroExitWarningDoesNotBecomeAFailure() {
+        let failure = PymobiledeviceFailureSummary.failureIfReported(
+            standardError: "NotOpenSSLWarning: urllib3 uses LibreSSL",
+            standardOutput: "device information",
+            exitCode: 0,
+            stage: .trust
+        )
+
+        XCTAssertNil(failure)
+    }
+
     func testAuthorizationFailureStillClassifiesWhenNotLocked() {
         let failure = PymobiledeviceFailureSummary.classify(
             standardError: "PairingDialogResponsePendingError: pairing is pending",
