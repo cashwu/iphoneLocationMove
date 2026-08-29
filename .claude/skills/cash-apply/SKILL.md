@@ -364,6 +364,17 @@ The trigger is guidance only — it MUST NOT block apply from proceeding when th
    - If the final round decision is `passed`, the final response MAY tell the user they can archive with `/cash-archive`. When it does, it MUST also tell them to commit first with `/cash-commit`, or to archive through the `/cash-commit` "Archive first, then commit together" sub-flow, because running `/cash-archive` on its own deletes the touched state that `/cash-commit` uses as its source allowlist, leaving it to fall back to the archive manifest's point-in-time snapshot — which does not include anything changed after archiving, and does not exist at all in archives created before that field was added.
    - If the final round decision is `aborted`, do NOT suggest archive; summarize the unresolved findings and point to the final round file.
 
+   最終回覆建議封存該 change 時，MUST 逐字輸出下方 fenced 固定文案模板，唯二允許的代換：把 `<change>` 代入實際 change 名稱、以及變體 invocation 前綴（斜線與錢字號兩種形式）的差異；MUST NOT 以省略任一路徑或改寫模板的方式壓縮此指引。模板本體屬逐字保留內容，比照 CLI 指令與引用原文：「使用者明確要求其他語言時遵從最新指示」的規則適用於回覆的其他部分，語言切換規則不適用於模板本體，MUST NOT 用於改寫或翻譯模板本體。「較舊的封存沒有 `touched_files` 欄位」的歷史註腳保留在上方 `passed` 分支的規範句中，對當下要封存的 change 永不適用，不進模板。
+
+   ```
+   封存前請先提交。兩條安全路徑擇一：
+
+   1. 先執行 `/cash-commit` 提交、再執行 `/cash-archive` 封存 `<change>`。
+   2. 或執行 `/cash-commit` 並在確認選項選 `Archive first, then commit together` 子流程，由 commit 流程代跑封存並把封存檔案搬移併入同一個 commit。
+
+   ⚠ 警告——請勿先單獨執行 `/cash-archive`：封存會刪除 `.cash-skills/state/touched/<change>.json`（`/cash-commit` 用作來源允許清單的 touched state），使 `/cash-commit` 退回封存 manifest 的時間點快照，封存後的變更不會入列。
+   ```
+
 11. **Sub-Agent Review/Rating/Fix Loop**
 
 <!-- REVIEW-GATE:BEGIN -->

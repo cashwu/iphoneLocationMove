@@ -76,6 +76,24 @@ Archive a completed change.
 
    Do not invoke another skill or delete touched state directly. The Cash CLI owns touched import, sync state, legacy cleanup diagnostics, transaction flags, and cleanup.
 
+4b. **Uncommitted source guard**
+
+   在執行 `"$cash_cli" archive` 之前，守門檢查 touched 允許清單中是否仍有未提交的 source 檔案——單獨封存會刪除 touched state，使後續 commit 失去來源允許清單。本步驟對 touched state 只讀不寫：MUST NOT 修改或刪除 `.cash-skills/state/touched/<name>.json` 或 `.spectra/touched/<name>.json`。
+
+   - **取得 touched path set**：若 `.cash-skills/state/touched/<name>.json` 存在，讀取其 top-level `files` 欄位（CLI 驗證過的 canonical union）；若該檔不存在而 legacy 路徑 `.spectra/touched/<name>.json` 存在，改讀 legacy 檔 `touched` 陣列各條目 `files` 的聯集——legacy schema 的 top-level keys 恰為 `change` 與 `touched`，沒有 top-level `files`，MUST NOT 因此把合法 legacy 檔誤判為 malformed；步驟 5 的 CLI archive 會 import legacy touched state 後同樣刪除它，守門必須涵蓋同一 hazard。兩個 touched 路徑都不存在時，靜默通過本步驟，不發問也不顯示訊息。
+   - **Malformed 放行**：touched 檔存在但無法依 current／legacy schema 安全取得合法的 path set 時——例如無法解析為 JSON、current 檔缺 top-level `files` 或其值不是 string array、legacy 檔缺合法 `touched` 陣列——MUST NOT 在 skill 層重製完整 CLI validator，不猜測、不修改任何檔案，直接放行進入步驟 5，由 CLI fail closed 並保留其實際 diagnostic：可能為 `state_invalid`、`touched_invalid` 或 `legacy_touched_invalid`，守門 MUST NOT 預判或替 CLI 斷定單一錯誤碼。
+   - **取得 dirty 路徑**：在 project root 執行下列完整指令，並依 NUL-delimited 格式解析輸出：
+
+     ```bash
+     git status --porcelain=v1 -z --untracked-files=all
+     ```
+
+     條目涵蓋 staged、unstaged 與 untracked；每筆條目以兩字元狀態欄加一個空白開頭，比對前先剝除該前綴取出路徑；rename／copy 條目帶兩個 NUL 結尾路徑（先新路徑、後舊路徑），僅第一段帶狀態欄前綴，第二個 NUL field 是裸 old path，MUST NOT 對其剝除前綴——逐 field 套剝除規則會截掉舊路徑前三個字元，使 touched 檔被 rename 走時交集靜默漏判——新舊兩路徑皆計入 dirty 集合；`-z` 模式下路徑不做 C-quoting，可與 touched 中的 raw 路徑直接比對。
+   - **偵測失敗停止**：該 git 指令以 non-zero 結束、或其輸出無法依 NUL-delimited 格式完整解析時，MUST NOT 把偵測失敗視同交集為空：停止 workflow、報告原始錯誤，且 MUST NOT 呼叫 `"$cash_cli" archive`。
+   - **交集判定**：touched path set 與 dirty 路徑取交集。交集為空時，靜默通過本步驟，不發問也不顯示訊息。交集非空時，列出這些未提交的 source 檔案，用 **AskUserQuestion tool** 提供恰好兩個互斥選項：
+     - **停止本次封存（建議）**：改執行 `$cash-commit` 並在確認選項選 `Archive first, then commit together`，讓封存與提交進同一個 commit；選此項時 MUST NOT 呼叫 `"$cash_cli" archive`。
+     - **仍要單獨封存**：知悉封存會刪除 touched state、後續 `$cash-commit` 退回封存 manifest 的時間點快照的後果後，繼續步驟 5，不再重複發問。
+
 5. **Perform the archive**
 
    Use the `"$cash_cli" archive` command, adding the resolved flags:
