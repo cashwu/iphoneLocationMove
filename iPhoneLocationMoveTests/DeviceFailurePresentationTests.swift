@@ -7,6 +7,7 @@ final class DeviceFailurePresentationTests: XCTestCase {
             .timeout,
             .usbDisconnected,
             .authorizationDenied,
+            .deviceLocked,
             .prerequisiteFailed(
                 stage: .developerDiskImage,
                 message: "image unavailable"
@@ -35,6 +36,14 @@ final class DeviceFailurePresentationTests: XCTestCase {
         XCTAssertEqual(presentation.recoveryAction, .retryClear)
         XCTAssertTrue(presentation.message.contains("不能宣稱"))
         XCTAssertTrue(presentation.message.contains("恢復真實定位"))
+    }
+
+    func testDeviceLockedTellsUserToUnlockInsteadOfShowingDDIFailure() {
+        let presentation = DeviceFailurePresentation.make(for: .deviceLocked)
+
+        XCTAssertEqual(presentation.recoveryAction, .unlockDevice)
+        XCTAssertTrue(presentation.title.contains("鎖定"))
+        XCTAssertTrue(presentation.message.contains("解鎖"))
     }
 
     func testUSBAndUncertainFailuresDoNotUseReadyOrActiveLanguage() {

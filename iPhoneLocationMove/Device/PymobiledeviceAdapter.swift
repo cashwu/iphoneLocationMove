@@ -897,6 +897,163 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
 
 // MARK: - Production boundary
 
+/// Turns a failed `pymobiledevice3` invocation into one readable line.
+///
+/// The CLI writes a `rich` traceback to stderr, prefixed by an unrelated
+/// `NotOpenSSLWarning`. Surfacing that verbatim buries the one line that tells
+/// the user what to do, so only the exception summary is kept.
+enum PymobiledeviceFailureSummary {
+    private static let maximumLength = 400
+    private static let boxCharacters = CharacterSet(
+        charactersIn: "\u{2500}\u{2501}\u{2502}\u{2503}\u{250C}\u{2510}"
+            + "\u{2514}\u{2518}\u{2550}\u{256D}\u{256E}\u{256F}\u{2570}"
+            + "\u{2771} \t"
+    )
+
+    /// Classifies a failed invocation. Classification reads the untruncated
+    /// detail so a long exception cannot push the lock or authorization
+    /// marker past the display limit; only the message shown to the user is
+    /// truncated.
+    static func classify(
+        standardError: String,
+        standardOutput: String,
+        exitCode: Int32,
+        stage: DevicePrerequisiteStage
+    ) -> DeviceLocationError {
+        // A lock marker in either stream wins over an authorization marker
+        // in either stream: unlocking is a precondition for trusting, so
+        // "unlock the phone" is the right next step even when pairing is
+        // also pending, while "trust this Mac" leaves a locked phone stuck.
+        // The displayed detail still comes from a single stream so the two
+        // are never spliced into one sentence.
+        let summaries = [standardError, standardOutput].compactMap(streamSummary)
+        if summaries.contains(where: isDeviceLockedFailure) {
+            return .deviceLocked
+        }
+        if summaries.contains(where: isAuthorizationFailure) {
+            return .authorizationDenied
+        }
+        let detail = detail(
+            standardError: standardError,
+            standardOutput: standardOutput,
+            exitCode: exitCode
+        )
+        return .prerequisiteFailed(stage: stage, message: truncated(detail))
+    }
+
+    static func summarize(
+        standardError: String,
+        standardOutput: String,
+        exitCode: Int32
+    ) -> String {
+        truncated(
+            detail(
+                standardError: standardError,
+                standardOutput: standardOutput,
+                exitCode: exitCode
+            )
+        )
+    }
+
+    /// Each stream is summarized on its own: joining them first would splice
+    /// standard output onto the tail of the standard error exception.
+    private static func detail(
+        standardError: String,
+        standardOutput: String,
+        exitCode: Int32
+    ) -> String {
+        if let summary = streamSummary(standardError) {
+            return summary
+        }
+        if let summary = streamSummary(standardOutput) {
+            return summary
+        }
+        return "pymobiledevice3 exited with \(exitCode)"
+    }
+
+    private static func streamSummary(_ stream: String) -> String? {
+        let lines = stream.components(separatedBy: .newlines)
+        return exceptionSummary(in: lines) ?? lastMeaningfulLine(in: lines)
+    }
+
+    static func isDeviceLockedFailure(_ detail: String) -> Bool {
+        let normalized = detail.lowercased()
+        return normalized.contains("devicelocked")
+            || normalized.contains("device is locked")
+            || normalized.contains("passwordrequired")
+            || normalized.contains("passwordprotected")
+    }
+
+    static func isAuthorizationFailure(_ detail: String) -> Bool {
+        let normalized = detail.lowercased()
+        return normalized.contains("not trusted")
+            || normalized.contains("pairing")
+            || normalized.contains("permission denied")
+            || normalized.contains("user denied")
+    }
+
+    /// `rich` prints the exception after the traceback box, wrapped at
+    /// whitespace, so the lines past the closing border are rejoined.
+    private static func exceptionSummary(in lines: [String]) -> String? {
+        guard let borderIndex = lines.lastIndex(where: isBoxBorder) else {
+            return nil
+        }
+        // Trim the box characters, not just whitespace, so the anchored
+        // source-echo pattern can match here exactly as it does in
+        // `lastMeaningfulLine`.
+        let tail = lines[lines.index(after: borderIndex)...]
+            .map { $0.trimmingCharacters(in: boxCharacters) }
+            .filter { !$0.isEmpty && !isNoise($0) }
+        guard !tail.isEmpty else {
+            return nil
+        }
+        return tail.joined(separator: " ")
+    }
+
+    private static func isBoxBorder(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else {
+            return false
+        }
+        return trimmed.unicodeScalars.allSatisfy(boxCharacters.contains)
+    }
+
+    private static func lastMeaningfulLine(in lines: [String]) -> String? {
+        lines
+            .map { $0.trimmingCharacters(in: boxCharacters) }
+            .last { !$0.isEmpty && !isNoise($0) }
+    }
+
+    /// The third pattern matches the `140 |   def wrapper(...)` source
+    /// listing that `rich` prints inside a frame.
+    private static let noisePatterns = [
+        #"\.py:\d+: \w*Warning:"#,
+        #"\.py:\d+ in \S+"#,
+        "^[\u{2771} ]*[0-9]+ *\u{2502}",
+    ]
+
+    private static func isNoise(_ line: String) -> Bool {
+        if line.hasPrefix("warnings.warn") {
+            return true
+        }
+        if line.contains("Traceback (most recent call last)") {
+            return true
+        }
+        for pattern in noisePatterns
+            where line.range(of: pattern, options: .regularExpression) != nil {
+            return true
+        }
+        return false
+    }
+
+    private static func truncated(_ text: String) -> String {
+        guard text.count > maximumLength else {
+            return text
+        }
+        return String(text.prefix(maximumLength)) + "\u{2026}"
+    }
+}
+
 private actor LivePymobiledeviceBoundary: PymobiledeviceBoundary {
     private let runtimeManager: RuntimeManager
     private let processRunner: any RuntimeProcessRunning
@@ -1098,30 +1255,14 @@ private actor LivePymobiledeviceBoundary: PymobiledeviceBoundary {
             )
         }
         guard output.exitCode == 0 else {
-            let detail = Self.failureDetail(output)
-            if Self.isAuthorizationFailure(detail) {
-                throw DeviceLocationError.authorizationDenied
-            }
-            throw DeviceLocationError.prerequisiteFailed(
-                stage: stage,
-                message: detail
+            throw PymobiledeviceFailureSummary.classify(
+                standardError: output.standardError,
+                standardOutput: output.standardOutput,
+                exitCode: output.exitCode,
+                stage: stage
             )
         }
         return output
-    }
-
-    private static func failureDetail(_ output: RuntimeProcessOutput) -> String {
-        let detail = (output.standardError + "\n" + output.standardOutput)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return detail.isEmpty ? "pymobiledevice3 exited with \(output.exitCode)" : detail
-    }
-
-    private static func isAuthorizationFailure(_ detail: String) -> Bool {
-        let normalized = detail.lowercased()
-        return normalized.contains("not trusted")
-            || normalized.contains("pairing")
-            || normalized.contains("permission denied")
-            || normalized.contains("user denied")
     }
 
     private static func decodeUSBDevices(_ output: String) throws -> [USBDevice] {

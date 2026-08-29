@@ -1402,3 +1402,346 @@ private func XCTAssertEqualAsync<T: Equatable>(
     let actual = try await expression()
     XCTAssertEqual(actual, expected, file: file, line: line)
 }
+
+final class PymobiledeviceFailureSummaryTests: XCTestCase {
+    /// Captured from `mounter auto-mount` against a locked iPhone 17 Pro.
+    private let lockedDeviceStderr = """
+    /Users/tester/Library/Application Support/iPhoneLocationMove/DeviceRuntime/\
+    pymobiledevice3-venv/lib/python3.9/site-packages/urllib3/__init__.py:35: \
+    NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the \
+    'ssl' module is compiled with 'LibreSSL 2.8.3'. See: \
+    https://github.com/urllib3/urllib3/issues/3020
+      warnings.warn(
+    ╭─────────────────── Traceback (most recent call last) ───────────────────╮
+    │ /Users/tester/Library/Application                                       │
+    │ Support/iPhoneLocationMove/DeviceRuntime/pymobiledevice3-venv/lib/      │
+    │ python3.9/site-packages/pymobiledevice3/services/                       │
+    │ mobile_image_mounter.py:195 in upload_image                             │
+    │                                                                         │
+    │   192 │   │   status = result.get("Status")                             │
+    │ ❱ 195 │   │   │   raise PyMobileDevice3Exception(f"command ReceiveBytes  │
+    ╰─────────────────────────────────────────────────────────────────────────╯
+    PyMobileDevice3Exception: command ReceiveBytes failed with: {'Error':
+    'DeviceLocked'}
+    """
+
+    func testSummaryKeepsOnlyTheExceptionLineFromARichTraceback() {
+        let summary = PymobiledeviceFailureSummary.summarize(
+            standardError: lockedDeviceStderr,
+            standardOutput: "",
+            exitCode: 1
+        )
+
+        XCTAssertEqual(
+            summary,
+            "PyMobileDevice3Exception: command ReceiveBytes failed with: "
+                + "{'Error': 'DeviceLocked'}"
+        )
+        XCTAssertFalse(summary.contains("NotOpenSSLWarning"))
+        XCTAssertFalse(summary.contains("Traceback"))
+        XCTAssertFalse(summary.contains("site-packages"))
+    }
+
+    func testLockedDeviceStderrIsClassifiedAsDeviceLocked() {
+        let summary = PymobiledeviceFailureSummary.summarize(
+            standardError: lockedDeviceStderr,
+            standardOutput: "",
+            exitCode: 1
+        )
+
+        XCTAssertTrue(
+            PymobiledeviceFailureSummary.isDeviceLockedFailure(summary)
+        )
+        XCTAssertFalse(
+            PymobiledeviceFailureSummary.isAuthorizationFailure(summary)
+        )
+    }
+
+    func testSingleLineOutputWithoutATracebackIsUsedAsIs() {
+        let summary = PymobiledeviceFailureSummary.summarize(
+            standardError: "ERROR: Device is not connected\n",
+            standardOutput: "",
+            exitCode: 2
+        )
+
+        XCTAssertEqual(summary, "ERROR: Device is not connected")
+    }
+
+    func testWarningOnlyStderrFallsBackToTheExitCode() {
+        let summary = PymobiledeviceFailureSummary.summarize(
+            standardError: """
+            /venv/lib/python3.9/site-packages/urllib3/__init__.py:35: \
+            NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+
+              warnings.warn(
+            """,
+            standardOutput: "",
+            exitCode: 3
+        )
+
+        XCTAssertEqual(summary, "pymobiledevice3 exited with 3")
+    }
+
+    func testClassificationPrefersDeviceLockOverStagePrerequisite() {
+        let failure = PymobiledeviceFailureSummary.classify(
+            standardError: lockedDeviceStderr,
+            standardOutput: "",
+            exitCode: 1,
+            stage: .developerDiskImage
+        )
+
+        XCTAssertEqual(failure, .deviceLocked)
+    }
+
+    func testLockDuringATrustStageIsStillClassifiedAsDeviceLocked() {
+        let failure = PymobiledeviceFailureSummary.classify(
+            standardError: "PasswordRequiredError: device is locked",
+            standardOutput: "",
+            exitCode: 1,
+            stage: .trust
+        )
+
+        XCTAssertEqual(failure, .deviceLocked)
+    }
+
+    func testRawLockdownPasswordProtectedIsClassifiedAsDeviceLocked() {
+        let failure = PymobiledeviceFailureSummary.classify(
+            standardError: "PyMobileDevice3Exception: {'Error': 'PasswordProtected'}",
+            standardOutput: "",
+            exitCode: 1,
+            stage: .trust
+        )
+
+        XCTAssertEqual(failure, .deviceLocked)
+    }
+
+    func testAuthorizationFailureStillClassifiesWhenNotLocked() {
+        let failure = PymobiledeviceFailureSummary.classify(
+            standardError: "PairingDialogResponsePendingError: pairing is pending",
+            standardOutput: "",
+            exitCode: 1,
+            stage: .trust
+        )
+
+        XCTAssertEqual(failure, .authorizationDenied)
+    }
+
+    /// A pairing failure arrives as a rich traceback too, so the
+    /// authorization path needs the same end-to-end oracle as the lock path.
+    func testPairingTracebackStillClassifiesAsAuthorization() {
+        let stderr = """
+        /venv/lib/python3.9/site-packages/urllib3/__init__.py:35: \
+        NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+
+          warnings.warn(
+        ╭─────────────────── Traceback (most recent call last) ───────────────────╮
+        │ /venv/lib/python3.9/site-packages/pymobiledevice3/lockdown.py:812 in    │
+        │ pair                                                                    │
+        │ ❱ 812 │   │   raise PairingDialogResponsePendingError()                 │
+        ╰─────────────────────────────────────────────────────────────────────────╯
+        PairingDialogResponsePendingError: pairing dialog response is still
+        pending
+        """
+
+        XCTAssertEqual(
+            PymobiledeviceFailureSummary.classify(
+                standardError: stderr,
+                standardOutput: "",
+                exitCode: 1,
+                stage: .trust
+            ),
+            .authorizationDenied
+        )
+    }
+
+    func testLockMarkerPrintedOnlyToStandardOutputIsStillClassified() {
+        let failure = PymobiledeviceFailureSummary.classify(
+            standardError: "ERROR: mount step reported a failure",
+            standardOutput: "{'Error': 'DeviceLocked'}",
+            exitCode: 1,
+            stage: .developerDiskImage
+        )
+
+        XCTAssertEqual(failure, .deviceLocked)
+    }
+
+    /// The real keyword sets are disjoint — pymobiledevice3's lock message
+    /// ("your device is protected with password…") carries no authorization
+    /// keyword — so the lock-before-authorization precedence is only
+    /// observable with a constructed input. Pinning it here keeps a future
+    /// keyword change from silently flipping the branch order.
+    func testDeviceLockTakesPrecedenceOverAuthorizationOnTheSameLine() {
+        let failure = PymobiledeviceFailureSummary.classify(
+            standardError: "PairingError: pairing failed, {'Error': 'PasswordProtected'}",
+            standardOutput: "",
+            exitCode: 1,
+            stage: .trust
+        )
+
+        XCTAssertEqual(failure, .deviceLocked)
+    }
+
+    func testDeviceLockWinsWhenTheAuthorizationMarkerIsInTheOtherStream() {
+        let failure = PymobiledeviceFailureSummary.classify(
+            standardError: "PairingDialogResponsePendingError: pairing is pending",
+            standardOutput: "{'Error': 'DeviceLocked'}",
+            exitCode: 1,
+            stage: .trust
+        )
+
+        XCTAssertEqual(failure, .deviceLocked)
+    }
+
+    func testDeviceLockWinsWhenTheLockMarkerIsInStandardError() {
+        let failure = PymobiledeviceFailureSummary.classify(
+            standardError: "PasswordRequiredError: your device is protected with password",
+            standardOutput: "hint: pairing dialog may still be open",
+            exitCode: 1,
+            stage: .trust
+        )
+
+        XCTAssertEqual(failure, .deviceLocked)
+    }
+
+    /// `lastMeaningfulLine` must take the LAST usable line, not the first;
+    /// single-line fixtures cannot tell the two apart.
+    func testMultiLineOutputWithoutATracebackTakesTheLastMeaningfulLine() {
+        let summary = PymobiledeviceFailureSummary.summarize(
+            standardError: "connecting to device\nERROR: mount failed\n",
+            standardOutput: "",
+            exitCode: 1
+        )
+
+        XCTAssertEqual(summary, "ERROR: mount failed")
+    }
+
+    func testUnclassifiedFailureKeepsItsStageAndSummary() {
+        let failure = PymobiledeviceFailureSummary.classify(
+            standardError: "ERROR: Device is not connected",
+            standardOutput: "",
+            exitCode: 2,
+            stage: .developerMode
+        )
+
+        XCTAssertEqual(
+            failure,
+            .prerequisiteFailed(
+                stage: .developerMode,
+                message: "ERROR: Device is not connected"
+            )
+        )
+    }
+
+    func testLockMarkerBeyondTheDisplayLimitStillClassifies() {
+        let padding = String(repeating: "x", count: 500)
+        let failure = PymobiledeviceFailureSummary.classify(
+            standardError: "PyMobileDevice3Exception: \(padding) {'Error': 'DeviceLocked'}",
+            standardOutput: "",
+            exitCode: 1,
+            stage: .developerDiskImage
+        )
+
+        XCTAssertEqual(failure, .deviceLocked)
+    }
+
+    func testStandardOutputIsNotSplicedOntoTheStandardErrorException() {
+        let summary = PymobiledeviceFailureSummary.summarize(
+            standardError: lockedDeviceStderr,
+            standardOutput: "Mounted images: 0\nHint: unlock the device\n",
+            exitCode: 1
+        )
+
+        XCTAssertEqual(
+            summary,
+            "PyMobileDevice3Exception: command ReceiveBytes failed with: "
+                + "{'Error': 'DeviceLocked'}"
+        )
+    }
+
+    func testStandardOutputIsUsedOnlyWhenStandardErrorHasNothingUsable() {
+        let summary = PymobiledeviceFailureSummary.summarize(
+            standardError: "",
+            standardOutput: "ERROR: Device is not connected\n",
+            exitCode: 2
+        )
+
+        XCTAssertEqual(summary, "ERROR: Device is not connected")
+    }
+
+    func testSummaryLongerThanTheDisplayLimitIsTruncated() {
+        let summary = PymobiledeviceFailureSummary.summarize(
+            standardError: "PyMobileDevice3Exception: " + String(repeating: "x", count: 500),
+            standardOutput: "",
+            exitCode: 1
+        )
+
+        XCTAssertEqual(summary.count, 401)
+        XCTAssertTrue(summary.hasSuffix("\u{2026}"))
+    }
+
+    /// The production path truncates inside `classify`, not `summarize`, so
+    /// the display limit needs an oracle on the `prerequisiteFailed` message.
+    func testUnclassifiedFailureTruncatesTheMessageItShows() {
+        let failure = PymobiledeviceFailureSummary.classify(
+            standardError: "ERROR: " + String(repeating: "x", count: 500),
+            standardOutput: "",
+            exitCode: 1,
+            stage: .developerMode
+        )
+
+        guard case let .prerequisiteFailed(stage, message) = failure else {
+            return XCTFail("expected a prerequisite failure, got \(failure)")
+        }
+        XCTAssertEqual(stage, .developerMode)
+        XCTAssertEqual(message.count, 401)
+        XCTAssertTrue(message.hasSuffix("\u{2026}"))
+    }
+
+    /// When output is cut off mid-box the last border is an inner blank
+    /// rule, so the tail still carries frame scaffolding. Only the noise
+    /// rules keep it out of the summary here.
+    func testNoiseRulesDropFrameScaffoldingWhenTheBoxIsUnclosed() {
+        let stderr = """
+        \u{256D}\u{2500}\u{2500} Traceback (most recent call last) \u{2500}\u{2500}\u{256E}
+        \u{2502} /venv/lib/python3.9/site-packages/pymobiledevice3/x.py:99 in run \u{2502}
+        \u{2502}                                                                \u{2502}
+        \u{2502} /venv/lib/python3.9/site-packages/pymobiledevice3/lockdown.py:812 in pair \u{2502}
+        \u{2502} \u{2771} 812 \u{2502}   raise PasswordRequiredError()             \u{2502}
+        \u{2502} PasswordRequiredError: your device is protected with password \u{2502}
+        """
+
+        XCTAssertEqual(
+            PymobiledeviceFailureSummary.summarize(
+                standardError: stderr,
+                standardOutput: "",
+                exitCode: 1
+            ),
+            "PasswordRequiredError: your device is protected with password"
+        )
+    }
+
+    /// Output killed right after the header leaves the traceback title as
+    /// the last usable line; only the title rule keeps it out of the summary.
+    func testNoiseRulesDropATracebackTitleLeftDanglingByTruncatedOutput() {
+        let stderr = """
+        /venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: x
+          warnings.warn(
+        \u{256D}\u{2500}\u{2500} Traceback (most recent call last) \u{2500}\u{2500}\u{256E}
+        """
+
+        XCTAssertEqual(
+            PymobiledeviceFailureSummary.summarize(
+                standardError: stderr,
+                standardOutput: "",
+                exitCode: 7
+            ),
+            "pymobiledevice3 exited with 7"
+        )
+    }
+
+    func testTrustFailureStillMapsToAuthorization() {
+        XCTAssertTrue(
+            PymobiledeviceFailureSummary.isAuthorizationFailure(
+                "PairingDialogResponsePendingError: pairing is pending"
+            )
+        )
+    }
+}

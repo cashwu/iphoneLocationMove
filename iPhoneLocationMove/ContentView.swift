@@ -51,7 +51,7 @@ struct ContentView: View {
 struct LocationWorkspaceView: View {
     @ObservedObject var store: DeviceSetupStore
     @ObservedObject var macLocationCoordinator: MacLocationCoordinator
-    @ObservedObject var favoritesStore: FavoritesStore = FavoritesStore()
+    @ObservedObject var favoritesStore: FavoritesStore = FavoritesStore(defaults: .standard)
 
     var body: some View {
         VStack(spacing: 0) {

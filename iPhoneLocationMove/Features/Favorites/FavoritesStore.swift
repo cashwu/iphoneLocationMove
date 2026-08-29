@@ -16,7 +16,10 @@ final class FavoritesStore: ObservableObject {
     @Published private(set) var favorites: [FavoritePlace]
     private let defaults: UserDefaults
 
-    init(defaults: UserDefaults = .standard) {
+    /// `defaults` is deliberately not defaulted to `.standard`: a bare
+    /// `FavoritesStore()` in a test would read and overwrite the real saved
+    /// favourites of whoever runs it.
+    init(defaults: UserDefaults) {
         self.defaults = defaults
         favorites = Self.load(from: defaults)
     }

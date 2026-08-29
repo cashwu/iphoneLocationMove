@@ -279,6 +279,7 @@ enum DeviceLocationError: Error, Equatable, Hashable, Sendable {
     case timeout
     case usbDisconnected
     case authorizationDenied
+    case deviceLocked
     case transportClosed(DeviceBackendFailure)
     case transportFailure(String)
     case helperFailure(String)
@@ -293,6 +294,7 @@ enum DeviceRecoveryAction: Equatable, Sendable {
     case retry
     case reconnectUSB
     case approveTrust
+    case unlockDevice
     case enableDeveloperMode
     case prepareDeveloperDiskImage
     case approveHelper
@@ -329,6 +331,13 @@ struct DeviceFailurePresentation: Equatable, Sendable {
                 message: "請解鎖 iPhone、信任這台 Mac，並核准需要的系統 helper。",
                 recoveryTitle: "完成授權後重試",
                 recoveryAction: .approveTrust
+            )
+        case .deviceLocked:
+            Self(
+                title: "iPhone 螢幕已鎖定",
+                message: "iPhone 鎖定時無法完成準備。請解鎖 iPhone 並讓螢幕保持開啟後重試。",
+                recoveryTitle: "解鎖後重試",
+                recoveryAction: .unlockDevice
             )
         case let .prerequisiteFailed(stage, message):
             prerequisitePresentation(stage: stage, detail: message)

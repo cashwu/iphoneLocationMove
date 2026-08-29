@@ -204,7 +204,6 @@ struct LocationMapView: View {
                 searchControls
                 searchResults
                 previewControls
-                favoritesControls
                 endpointControls
                 routeControls
                 if let simulationStore {
@@ -217,6 +216,7 @@ struct LocationMapView: View {
                 } else {
                     DisconnectedSimulationControls()
                 }
+                favoritesControls
 
                 if let message {
                     Text(message)
@@ -385,18 +385,38 @@ struct LocationMapView: View {
         }
     }
 
+    /// A row measures 16pt and rows sit 6pt apart, so five rows fill 104pt.
+    /// Past that the list scrolls internally instead of growing the sidebar.
+    private static let favoritesVisibleRowLimit = 5
+    private static let favoritesListMaxHeight: CGFloat = 104
+
     @ViewBuilder
     private var favoritesControls: some View {
         if !favoritesStore.favorites.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
+                Divider()
                 Text("我的最愛")
                     .font(.headline)
-                ForEach(favoritesStore.favorites) { favorite in
-                    favoriteRow(favorite)
+                if favoritesStore.favorites.count > Self.favoritesVisibleRowLimit {
+                    ScrollView {
+                        favoriteRows
+                    }
+                    .frame(height: Self.favoritesListMaxHeight)
+                } else {
+                    favoriteRows
                 }
             }
             .testingLayoutRegion("sidebar-favorites-list")
         }
+    }
+
+    private var favoriteRows: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(favoritesStore.favorites) { favorite in
+                favoriteRow(favorite)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func favoriteRow(_ favorite: FavoritePlace) -> some View {
