@@ -117,6 +117,12 @@ private actor DeviceMutationQueue {
     }
 }
 
+/// Where the adapter observed the USB interruption.
+private enum USBDisconnectSource: String {
+    case external
+    case tunnelExited = "tunnel_exited"
+}
+
 actor PymobiledeviceAdapter: DeviceLocationClient {
     private let boundary: any PymobiledeviceBoundary
     private let mutationQueue = DeviceMutationQueue()
@@ -198,13 +204,32 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
             selectedDeviceID: disconnectedDeviceID,
             publishReady: false
         )
+        let candidateLease = tunnelLease
         do {
             try await sendClear(
                 context: DeviceCleanupContext(generation: newSession.generation),
                 session: newSession
             )
         } catch let error as DeviceLocationError {
+            // `usbDisconnected` means the clear's own recovery probed an exited
+            // tunnel, so `markUSBDisconnected` already released this candidate
+            // and published `interrupted`. Anything else still owns the
+            // candidate transport and must tear it down before rethrowing, so
+            // the next reconnect never races a second lease.
+            guard error != .usbDisconnected else {
+                throw error
+            }
+            session = nil
+            tunnelLease = nil
+            dvtHandle = nil
+            runtime = nil
+            transportGeneration = (try? transportGeneration.advanced())
+                ?? transportGeneration
             state = .cleanupPending(session: newSession, failure: error)
+            try? await boundary.shutdownDVT(generation: newSession.generation)
+            if let candidateLease {
+                try? await boundary.stopTunnel(candidateLease)
+            }
             throw error
         }
 
@@ -373,46 +398,58 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
         guard selectedDevice?.id == deviceID, let oldSession = session else {
             return
         }
+        // `markUSBDisconnected` clears `tunnelLease`, so capture it first.
+        let oldLease = tunnelLease
+        guard markUSBDisconnected(oldSession: oldSession, source: .external) else {
+            return
+        }
+
+        try? await boundary.shutdownDVT(generation: oldSession.generation)
+        if let oldLease {
+            try? await boundary.stopTunnel(oldLease)
+        }
+    }
+
+    /// Publishes the observed USB interruption and releases the stale session.
+    ///
+    /// Returns `false` when the generation counters cannot advance; the caller
+    /// then skips the asynchronous teardown, matching the pre-existing
+    /// exhausted-generation behaviour.
+    @discardableResult
+    private func markUSBDisconnected(
+        oldSession: PreparedDeviceSession,
+        source: USBDisconnectSource
+    ) -> Bool {
         diagnosticLogger.record(
             .warning,
             category: "device",
             event: "usb.disconnected",
-            metadata: ["generation": String(oldSession.generation.rawValue)]
+            metadata: [
+                "generation": String(oldSession.generation.rawValue),
+                "source": source.rawValue,
+            ]
         )
-
+        let interruption = DeviceInterruption(
+            reason: .usbDisconnected,
+            positionKnowledge: .unknown
+        )
         do {
             try invalidateRecoveryOwnership()
             generation = try generation.advanced()
         } catch {
-            state = .interrupted(
-                session: oldSession,
-                interruption: DeviceInterruption(
-                    reason: .usbDisconnected,
-                    positionKnowledge: .unknown
-                )
-            )
-            return
+            state = .interrupted(session: oldSession, interruption: interruption)
+            return false
         }
 
         session = nil
-        disconnectedDeviceID = deviceID
-        state = .interrupted(
-            session: oldSession,
-            interruption: DeviceInterruption(
-                reason: .usbDisconnected,
-                positionKnowledge: .unknown
-            )
-        )
-
-        try? await boundary.shutdownDVT(generation: oldSession.generation)
-        if let tunnelLease {
-            try? await boundary.stopTunnel(tunnelLease)
-        }
+        disconnectedDeviceID = oldSession.device.id
+        state = .interrupted(session: oldSession, interruption: interruption)
         transportGeneration = (try? transportGeneration.advanced())
             ?? transportGeneration
         tunnelLease = nil
         dvtHandle = nil
         runtime = nil
+        return true
     }
 
     func teardownForQuit() async throws {
@@ -738,6 +775,7 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
             event: "transport.recovery_started",
             metadata: recoveryMetadata(
                 command: command,
+                logicalGeneration: ownership.logicalGeneration,
                 transportGeneration: oldTransportGeneration,
                 attempt: 1
             )
@@ -759,13 +797,21 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
                 metadata: tunnelStatusMetadata(
                     status,
                     command: command,
+                    logicalGeneration: ownership.logicalGeneration,
                     transportGeneration: oldTransportGeneration
                 )
             )
             guard status.state == .running else {
-                throw DeviceLocationError.tunnelFailure(
-                    "Tunnel process exited before recovery"
+                // The tunnel process is gone, which means the cable was pulled.
+                // DVT was already shut down above and the helper drops lease
+                // ownership for an exited tunnel, so this lease MUST NOT be
+                // stopped again. `transport.recovery_failed` is recorded once,
+                // by the catch block below.
+                markUSBDisconnected(
+                    oldSession: expectedSession,
+                    source: .tunnelExited
                 )
+                throw DeviceLocationError.usbDisconnected
             }
 
             try await boundary.stopTunnel(oldLease)
@@ -815,6 +861,7 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
                 event: "transport.recovery_succeeded",
                 metadata: recoveryMetadata(
                     command: command,
+                    logicalGeneration: ownership.logicalGeneration,
                     transportGeneration: candidateIdentity.generation,
                     attempt: 1
                 )
@@ -835,10 +882,18 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
                 event: "transport.recovery_failed",
                 metadata: recoveryMetadata(
                     command: command,
+                    logicalGeneration: ownership.logicalGeneration,
                     transportGeneration: oldTransportGeneration,
                     attempt: 1
                 )
             )
+            // The exited branch above invalidates our own ownership on
+            // purpose, so its typed failure must survive the stale mapping.
+            if let deviceError = error as? DeviceLocationError,
+               deviceError == .usbDisconnected
+            {
+                throw deviceError
+            }
             if recoveryOwnershipEpoch != ownership.epoch
                 || session != expectedSession
                 || generation != expectedSession.generation
@@ -865,12 +920,13 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
 
     private func recoveryMetadata(
         command: DVTLocationCommand,
+        logicalGeneration: DeviceSessionGeneration,
         transportGeneration: DeviceTransportGeneration,
         attempt: Int
     ) -> [String: String] {
         [
             "requestID": command.requestID.rawValue.uuidString,
-            "logicalGeneration": String(generation.rawValue),
+            "logicalGeneration": String(logicalGeneration.rawValue),
             "transportGeneration": String(transportGeneration.rawValue),
             "attempt": String(attempt),
         ]
@@ -879,10 +935,12 @@ actor PymobiledeviceAdapter: DeviceLocationClient {
     private func tunnelStatusMetadata(
         _ status: DeviceTunnelStatus,
         command: DVTLocationCommand,
+        logicalGeneration: DeviceSessionGeneration,
         transportGeneration: DeviceTransportGeneration
     ) -> [String: String] {
         var metadata = recoveryMetadata(
             command: command,
+            logicalGeneration: logicalGeneration,
             transportGeneration: transportGeneration,
             attempt: 1
         )

@@ -1201,6 +1201,9 @@ private struct SimulationControls: View {
                 .foregroundStyle(.secondary)
         case .starting(let mode, _):
             ProgressView(mode == .point ? "正在設定位置…" : "正在開始路線…")
+        case .reconnecting:
+            ProgressView("正在重新準備裝置…")
+                .testingLayoutRegion("sidebar-simulation-reconnecting-region")
         case .replacing:
             ProgressView("正在安全取代目前模式…")
         case .pointActive(let point):
@@ -1388,7 +1391,7 @@ private struct SimulationControls: View {
 
 private func simulationIsBusy(_ state: SimulationStoreState) -> Bool {
     switch state {
-    case .starting, .replacing:
+    case .starting, .reconnecting, .replacing:
         true
     case .stopping(_, nil):
         true
@@ -1403,7 +1406,7 @@ private func simulationHasCleanupOwnership(
     switch state {
     case .pointActive, .route, .interrupted, .stopping:
         true
-    case .idle, .starting, .replacing:
+    case .idle, .starting, .reconnecting, .replacing:
         false
     }
 }

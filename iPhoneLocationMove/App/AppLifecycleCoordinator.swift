@@ -116,21 +116,4 @@ final class AppLifecycleCoordinator: ObservableObject {
     }
 }
 
-extension SimulationStore: SimulationLifecycleControlling {
-    var hasActiveSimulation: Bool {
-        activeSessionID != nil
-    }
-
-    var cleanupFailure: DeviceLocationError? {
-        if case let .stopping(_, failure) = state {
-            return failure
-        }
-        return nil
-    }
-
-    func stopForQuit() async {
-        await stop()
-    }
-}
-
 extension PymobiledeviceAdapter: DeviceSessionQuitTeardown {}

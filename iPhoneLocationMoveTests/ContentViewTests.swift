@@ -385,6 +385,35 @@ final class ContentViewTests: XCTestCase {
         await device.resumeSet()
         await starting.value
 
+        await device.failNextSet(.usbDisconnected)
+        await device.suspendNextReconnect()
+        let reconnecting = Task {
+            await store.confirmPoint(
+                try! DeviceCoordinate(latitude: 25, longitude: 121),
+                riskAccepted: true
+            )
+        }
+        await device.waitForPendingReconnect()
+        await waitForViewUpdate(hostingView)
+        scrollSidebarToBottom(in: hostingView)
+        await waitForViewUpdate(hostingView)
+        try assertSidebarLayout(
+            in: hostingView,
+            requiredRegions: [
+                "sidebar-speed-region",
+                "sidebar-simulation-status-region",
+            ],
+            requiredPrimaryButtonIdentifiers: [
+                "sidebar-button-directions",
+                "sidebar-button-set-location",
+                "sidebar-button-start-route",
+            ]
+        )
+        assertTestingActionButtons(in: hostingView)
+        attachSnapshot(of: hostingView, name: "sidebar-connected-reconnecting")
+        await device.resumeReconnect(with: reconnectedSession())
+        await reconnecting.value
+
         try await store.startRoute(
             preview: routePreview(),
             speedKilometersPerHour: 4.5,
@@ -557,6 +586,21 @@ final class ContentViewTests: XCTestCase {
         await replacingDevice.resumeSet()
         await replacing.value
 
+        let reconnectingDevice = ResetTestSimulationDevice()
+        let reconnectingStore = makeSimulationStore(device: reconnectingDevice)
+        await reconnectingDevice.failNextSet(.usbDisconnected)
+        await reconnectingDevice.suspendNextReconnect()
+        let reconnecting = Task {
+            await reconnectingStore.confirmPoint(
+                try! DeviceCoordinate(latitude: 25, longitude: 121),
+                riskAccepted: true
+            )
+        }
+        await reconnectingDevice.waitForPendingReconnect()
+        try assertResetDisabled(simulationStore: reconnectingStore)
+        await reconnectingDevice.resumeReconnect(with: reconnectedSession())
+        await reconnecting.value
+
         let stoppingDevice = ResetTestSimulationDevice()
         let stoppingStore = makeSimulationStore(device: stoppingDevice)
         await stoppingStore.confirmPoint(
@@ -569,6 +613,102 @@ final class ContentViewTests: XCTestCase {
         try assertResetDisabled(simulationStore: stoppingStore)
         await stoppingDevice.resumeClear()
         await stopping.value
+    }
+
+    func testReconnectingSidebarShowsProgressAndHidesStopSimulation() async throws {
+        let device = ResetTestSimulationDevice()
+        let store = makeSimulationStore(device: device)
+        let (hostingView, window) = makeMapHostingView(
+            simulationStore: store,
+            model: try configuredRouteModel()
+        )
+        defer { removeFromWindow(window) }
+        await device.failNextSet(.usbDisconnected)
+        await device.suspendNextReconnect()
+
+        let start = Task {
+            await store.confirmPoint(
+                try! DeviceCoordinate(latitude: 25, longitude: 121),
+                riskAccepted: true
+            )
+        }
+        await device.waitForPendingReconnect()
+        await waitForViewUpdate(hostingView)
+
+        XCTAssertNotNil(
+            layoutRegion(
+                in: hostingView,
+                identifier: "sidebar-simulation-reconnecting-region"
+            )
+        )
+        let reset = try XCTUnwrap(
+            findButton(in: hostingView, identifier: "workspace-reset-button")
+        )
+        XCTAssertFalse(reset.isEnabled)
+        scrollSidebarToBottom(in: hostingView)
+        await waitForViewUpdate(hostingView)
+        // The start controls share `simulationIsBusy` with Reset, so the
+        // assertion above covers their disabled state; here they only have to
+        // still be on screen rather than replaced by the stop control.
+        XCTAssertNotNil(
+            layoutRegion(in: hostingView, identifier: "sidebar-button-set-location")
+        )
+        XCTAssertNotNil(
+            layoutRegion(in: hostingView, identifier: "sidebar-button-start-route")
+        )
+        XCTAssertNil(
+            layoutRegion(in: hostingView, identifier: "sidebar-button-stop-simulation")
+        )
+
+        await device.resumeReconnect(with: reconnectedSession())
+        await start.value
+        await waitForViewUpdate(hostingView)
+
+        guard case .pointActive = store.state else {
+            return XCTFail("Expected point active after the reconnect resumed")
+        }
+        XCTAssertNil(
+            layoutRegion(in: hostingView, identifier: "sidebar-simulation-error-region")
+        )
+    }
+
+    func testReconnectFailureSidebarShowsInterruptedUSBGuidance() async throws {
+        let device = ResetTestSimulationDevice()
+        let store = makeSimulationStore(device: device)
+        let (hostingView, window) = makeMapHostingView(simulationStore: store)
+        defer { removeFromWindow(window) }
+        await device.failNextSet(.usbDisconnected)
+        await device.suspendNextReconnect()
+
+        let start = Task {
+            await store.confirmPoint(
+                try! DeviceCoordinate(latitude: 25, longitude: 121),
+                riskAccepted: true
+            )
+        }
+        await device.waitForPendingReconnect()
+        await device.failReconnect(.noUSBDevice)
+        await start.value
+        await waitForViewUpdate(hostingView)
+
+        guard case let .interrupted(_, interruption, failure) = store.state else {
+            return XCTFail("Expected interrupted after the reconnect failed")
+        }
+        XCTAssertEqual(failure, .usbDisconnected)
+        XCTAssertEqual(interruption.reason, .usbDisconnected)
+        XCTAssertEqual(
+            DeviceFailurePresentation.make(for: failure).title,
+            "USB 已中斷"
+        )
+        XCTAssertNotNil(
+            layoutRegion(in: hostingView, identifier: "sidebar-simulation-error-region")
+        )
+        XCTAssertNil(
+            layoutRegion(
+                in: hostingView,
+                identifier: "sidebar-simulation-reconnecting-region"
+            )
+        )
     }
 
     func testResetStopsOnlyWhenSimulationOwnsCleanup() async throws {
@@ -1155,6 +1295,30 @@ final class ContentViewTests: XCTestCase {
         return false
     }
 
+    private func reconnectedSession() -> PreparedDeviceSession {
+        PreparedDeviceSession(
+            device: try! USBDevice(
+                id: DeviceID("content-view-device"),
+                name: "iPhone",
+                operatingSystemVersion: OperatingSystemVersion(
+                    majorVersion: 17,
+                    minorVersion: 0,
+                    patchVersion: 0
+                )
+            ),
+            generation: DeviceSessionGeneration(rawValue: 2)
+        )
+    }
+
+    private func layoutRegion(
+        in root: NSView,
+        identifier: String
+    ) -> TestingLayoutRegionView? {
+        allSubviews(in: root)
+            .compactMap { $0 as? TestingLayoutRegionView }
+            .first { $0.accessibilityIdentifier() == identifier }
+    }
+
     private func findButton(
         in root: NSView,
         identifier: String
@@ -1661,6 +1825,10 @@ private actor ContentViewDevice: DeviceSessionPreparing {
         context: DeviceMutationContext
     ) async throws {}
 
+    func reconnect() async throws -> PreparedDeviceSession {
+        throw DeviceLocationError.usbDisconnected
+    }
+
     func clearLocation(context: DeviceCleanupContext) async throws {}
     func shutdown(generation: DeviceSessionGeneration) async {}
     func teardownForQuit() async throws {}
@@ -1704,6 +1872,10 @@ private actor ContentViewSimulationDevice: DeviceLocationClient {
         setCallCount += 1
     }
 
+    func reconnect() async throws -> PreparedDeviceSession {
+        throw DeviceLocationError.usbDisconnected
+    }
+
     func clearLocation(context: DeviceCleanupContext) async throws {}
     func shutdown(generation: DeviceSessionGeneration) async {}
 }
@@ -1716,9 +1888,37 @@ private actor ResetTestSimulationDevice: DeviceLocationClient {
     private var pendingSet: CheckedContinuation<Void, Never>?
     private var pendingClear: CheckedContinuation<Void, Never>?
     private var nextClearFailure: DeviceLocationError?
+    private var nextSetFailure: DeviceLocationError?
+    private var shouldSuspendReconnect = false
+    private var pendingReconnect:
+        CheckedContinuation<PreparedDeviceSession, Error>?
 
     func suspendNextSet() {
         shouldSuspendSet = true
+    }
+
+    func failNextSet(_ failure: DeviceLocationError) {
+        nextSetFailure = failure
+    }
+
+    func suspendNextReconnect() {
+        shouldSuspendReconnect = true
+    }
+
+    func resumeReconnect(with session: PreparedDeviceSession) {
+        pendingReconnect?.resume(returning: session)
+        pendingReconnect = nil
+    }
+
+    func failReconnect(_ failure: DeviceLocationError) {
+        pendingReconnect?.resume(throwing: failure)
+        pendingReconnect = nil
+    }
+
+    func waitForPendingReconnect() async {
+        while pendingReconnect == nil {
+            await Task.yield()
+        }
     }
 
     func suspendNextClear() {
@@ -1773,6 +1973,20 @@ private actor ResetTestSimulationDevice: DeviceLocationClient {
             await withCheckedContinuation { continuation in
                 pendingSet = continuation
             }
+        }
+        if let nextSetFailure {
+            self.nextSetFailure = nil
+            throw nextSetFailure
+        }
+    }
+
+    func reconnect() async throws -> PreparedDeviceSession {
+        guard shouldSuspendReconnect else {
+            throw DeviceLocationError.usbDisconnected
+        }
+        shouldSuspendReconnect = false
+        return try await withCheckedThrowingContinuation { continuation in
+            pendingReconnect = continuation
         }
     }
 

@@ -522,9 +522,7 @@ final class PymobiledeviceAdapterTests: XCTestCase {
         )
         await boundary.setNextMutationError(.transportClosed(failure))
 
-        await XCTAssertThrowsDeviceError(
-            .tunnelFailure("Tunnel process exited before recovery")
-        ) {
+        await XCTAssertThrowsDeviceError(.usbDisconnected) {
             try await adapter.setLocation(
                 DeviceCoordinate(latitude: 25, longitude: 121),
                 context: DeviceMutationContext(
@@ -595,6 +593,21 @@ final class PymobiledeviceAdapterTests: XCTestCase {
         XCTAssertEqual(statusMetadata["state"], "exited")
         XCTAssertEqual(statusMetadata["terminationStatus"], "15")
         XCTAssertEqual(statusMetadata["stderrByteCount"], "8192")
+
+        let allEvents = entries.compactMap { $0["event"] as? String }
+        XCTAssertEqual(allEvents.filter { $0 == "transport.recovery_failed" }.count, 1)
+        XCTAssertEqual(allEvents.filter { $0 == "usb.disconnected" }.count, 1)
+        let disconnectEntry = try XCTUnwrap(
+            entries.first { $0["event"] as? String == "usb.disconnected" }
+        )
+        let disconnectMetadata = try XCTUnwrap(
+            disconnectEntry["metadata"] as? [String: String]
+        )
+        XCTAssertEqual(disconnectMetadata["source"], "tunnel_exited")
+        XCTAssertEqual(
+            Set(disconnectMetadata.keys),
+            ["generation", "source"]
+        )
     }
 
     func testClearTransportClosureRecoversOnceBeforeReleasingOwnership() async throws {
@@ -726,6 +739,181 @@ final class PymobiledeviceAdapterTests: XCTestCase {
         await XCTAssertEqualAsync(
             { await boundary.events },
             [.set(session.generation)]
+        )
+    }
+
+    func testTunnelExitedIsTreatedAsUSBDisconnectAndAllowsReconnect() async throws {
+        let device = try makeDevice(id: "device-17")
+        let boundary = FakePymobiledeviceBoundary(devices: [device])
+        let logger = RecordingDiagnosticLogger()
+        let adapter = PymobiledeviceAdapter(boundary: boundary, diagnosticLogger: logger)
+        let session = try await adapter.connect()
+        await boundary.resetEvents()
+        await boundary.setTunnelStatus(state: .exited, diagnostics: exitedDiagnostics())
+        await boundary.enqueueMutationBehaviors([.failure(transportClosedFailure())])
+
+        await XCTAssertThrowsDeviceError(.usbDisconnected) {
+            try await adapter.setLocation(
+                DeviceCoordinate(latitude: 25, longitude: 121),
+                context: DeviceMutationContext(
+                    simulationSessionID: SimulationSessionID(),
+                    generation: session.generation
+                )
+            )
+        }
+
+        await XCTAssertEqualAsync(
+            { await adapter.state },
+            .interrupted(
+                session: session,
+                interruption: DeviceInterruption(
+                    reason: .usbDisconnected,
+                    positionKnowledge: .unknown
+                )
+            )
+        )
+        await XCTAssertEqualAsync(
+            { await boundary.events },
+            [.set(session.generation), .shutdownDVT(session.generation)]
+        )
+        XCTAssertEqual(
+            logger.events.filter { $0.event == "transport.recovery_failed" }.count,
+            1
+        )
+        let disconnectEvents = logger.events.filter { $0.event == "usb.disconnected" }
+        XCTAssertEqual(disconnectEvents.count, 1)
+        XCTAssertEqual(disconnectEvents.first?.metadata["source"], "tunnel_exited")
+
+        await XCTAssertThrowsDeviceError(.usbDisconnected) {
+            try await adapter.clearLocation(
+                context: DeviceCleanupContext(generation: session.generation)
+            )
+        }
+
+        await boundary.resetEvents()
+        let reconnected = try await adapter.reconnect()
+        XCTAssertGreaterThan(
+            reconnected.generation.rawValue,
+            session.generation.rawValue
+        )
+        await XCTAssertEqualAsync({ await adapter.state }, .ready(reconnected))
+        await XCTAssertEqualAsync(
+            { await transportEvents(of: boundary) },
+            [
+                .reconcile,
+                .startTunnel(device.id),
+                .startDVT(reconnected.generation),
+                .clear(reconnected.generation),
+            ]
+        )
+
+        await boundary.resetEvents()
+        try await adapter.setLocation(
+            DeviceCoordinate(latitude: 25, longitude: 121),
+            context: DeviceMutationContext(
+                simulationSessionID: SimulationSessionID(),
+                generation: reconnected.generation
+            )
+        )
+        await XCTAssertEqualAsync(
+            { await boundary.events },
+            [.set(reconnected.generation)]
+        )
+    }
+
+    func testReconnectWithoutDisconnectRecordFailsAndKeepsReadyState() async throws {
+        let device = try makeDevice(id: "device-17")
+        let boundary = FakePymobiledeviceBoundary(devices: [device])
+        let adapter = PymobiledeviceAdapter(boundary: boundary)
+        let session = try await adapter.connect()
+        await boundary.resetEvents()
+
+        await XCTAssertThrowsDeviceError(.usbDisconnected) {
+            _ = try await adapter.reconnect()
+        }
+
+        await XCTAssertEqualAsync({ await adapter.state }, .ready(session))
+        await XCTAssertEqualAsync({ await boundary.events }, [])
+    }
+
+    func testReconnectClearFailureTearsDownCandidateAndAllowsSecondReconnect() async throws {
+        let device = try makeDevice(id: "device-17")
+        let boundary = FakePymobiledeviceBoundary(devices: [device])
+        let adapter = PymobiledeviceAdapter(boundary: boundary)
+        let session = try await adapter.connect()
+        await boundary.setTunnelStatus(state: .exited, diagnostics: exitedDiagnostics())
+        await boundary.enqueueMutationBehaviors([.failure(transportClosedFailure())])
+        await XCTAssertThrowsDeviceError(.usbDisconnected) {
+            try await adapter.setLocation(
+                DeviceCoordinate(latitude: 25, longitude: 121),
+                context: DeviceMutationContext(
+                    simulationSessionID: SimulationSessionID(),
+                    generation: session.generation
+                )
+            )
+        }
+        await boundary.resetEvents()
+        await boundary.setTunnelStatus(state: .running, diagnostics: exitedDiagnostics())
+        await boundary.enqueueMutationBehaviors([.failure(.timeout)])
+
+        await XCTAssertThrowsDeviceError(.timeout) {
+            _ = try await adapter.reconnect()
+        }
+
+        let pendingSession = await cleanupPendingSession(of: adapter)
+        let candidate = try XCTUnwrap(pendingSession)
+        await XCTAssertEqualAsync(
+            { await transportEvents(of: boundary) },
+            [
+                .reconcile,
+                .startTunnel(device.id),
+                .startDVT(candidate.generation),
+                .clear(candidate.generation),
+                .shutdownDVT(candidate.generation),
+                .stopTunnel(device.id),
+            ]
+        )
+
+        await XCTAssertThrowsDeviceError(.usbDisconnected) {
+            try await adapter.clearLocation(
+                context: DeviceCleanupContext(generation: candidate.generation)
+            )
+        }
+
+        let reconnected = try await adapter.reconnect()
+        await XCTAssertEqualAsync({ await adapter.state }, .ready(reconnected))
+        let allEvents = await transportEvents(of: boundary)
+        XCTAssertLessThanOrEqual(maximumConcurrentLeaseCount(allEvents), 1)
+    }
+
+    func testReconnectClearHittingExitedTunnelKeepsInterruptedWithoutStoppingLease() async throws {
+        let device = try makeDevice(id: "device-17")
+        let boundary = FakePymobiledeviceBoundary(devices: [device])
+        let adapter = PymobiledeviceAdapter(boundary: boundary)
+        let session = try await adapter.connect()
+        await boundary.setTunnelStatus(state: .exited, diagnostics: exitedDiagnostics())
+        await boundary.enqueueMutationBehaviors([.failure(transportClosedFailure())])
+        await XCTAssertThrowsDeviceError(.usbDisconnected) {
+            try await adapter.setLocation(
+                DeviceCoordinate(latitude: 25, longitude: 121),
+                context: DeviceMutationContext(
+                    simulationSessionID: SimulationSessionID(),
+                    generation: session.generation
+                )
+            )
+        }
+        await boundary.resetEvents()
+        await boundary.enqueueMutationBehaviors([.failure(transportClosedFailure())])
+
+        await XCTAssertThrowsDeviceError(.usbDisconnected) {
+            _ = try await adapter.reconnect()
+        }
+
+        let reconnectEvents = await transportEvents(of: boundary)
+        XCTAssertFalse(reconnectEvents.contains(.stopTunnel(device.id)))
+        await XCTAssertEqualAsync(
+            { await interruption(of: adapter) },
+            DeviceInterruption(reason: .usbDisconnected, positionKnowledge: .unknown)
         )
     }
 
@@ -1365,6 +1553,64 @@ private final class RecordingDiagnosticLogger: DiagnosticLogging, @unchecked Sen
             )
         }
     }
+}
+
+private func exitedDiagnostics() -> DeviceTunnelDiagnostics {
+    DeviceTunnelDiagnostics(
+        terminationStatus: 0,
+        stderrTail: "",
+        stderrByteCount: 0
+    )
+}
+
+private func transportEvents(
+    of boundary: FakePymobiledeviceBoundary
+) async -> [FakeBoundaryEvent] {
+    (await boundary.events).filter { event in
+        switch event {
+        case .reconcile, .startTunnel, .startDVT, .set, .clear, .shutdownDVT,
+             .stopTunnel:
+            true
+        default:
+            false
+        }
+    }
+}
+
+/// Highest number of tunnel leases the boundary held at the same time.
+private func maximumConcurrentLeaseCount(_ events: [FakeBoundaryEvent]) -> Int {
+    var open = 0
+    var maximum = 0
+    for event in events {
+        switch event {
+        case .startTunnel:
+            open += 1
+            maximum = max(maximum, open)
+        case .stopTunnel:
+            open -= 1
+        default:
+            break
+        }
+    }
+    return maximum
+}
+
+private func cleanupPendingSession(
+    of adapter: PymobiledeviceAdapter
+) async -> PreparedDeviceSession? {
+    guard case let .cleanupPending(session, _) = await adapter.state else {
+        return nil
+    }
+    return session
+}
+
+private func interruption(
+    of adapter: PymobiledeviceAdapter
+) async -> DeviceInterruption? {
+    guard case let .interrupted(_, interruption) = await adapter.state else {
+        return nil
+    }
+    return interruption
 }
 
 private func transportClosedFailure() -> DeviceLocationError {

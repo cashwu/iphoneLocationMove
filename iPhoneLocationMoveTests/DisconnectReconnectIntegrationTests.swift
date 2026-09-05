@@ -132,6 +132,76 @@ final class DisconnectReconnectIntegrationTests: XCTestCase {
         XCTAssertEqual(failure, .clearFailed("reconnect clear failed"))
     }
 
+    func testTunnelExitedDuringPointStartAutoReconnectsAndRunsOnTheNewGeneration()
+        async throws
+    {
+        let device = try makeRecoveryDevice()
+        let boundary = RecoveryBoundary(device: device)
+        let adapter = PymobiledeviceAdapter(boundary: boundary)
+        let session = try await adapter.connect()
+        let simulation = SimulationStore(
+            device: adapter,
+            generation: session.generation,
+            scheduler: RecoveryScheduler()
+        )
+        await boundary.setTunnelStatus(.exited)
+        await boundary.failNextSet(transportClosedFailure())
+
+        await simulation.confirmPoint(
+            try DeviceCoordinate(latitude: 25, longitude: 121),
+            riskAccepted: true
+        )
+
+        guard case .pointActive = simulation.state else {
+            return XCTFail("Expected the replayed set to publish point active")
+        }
+        guard case let .ready(newSession) = await adapter.state else {
+            return XCTFail("Expected the adapter to be ready again")
+        }
+        XCTAssertGreaterThan(
+            newSession.generation.rawValue,
+            session.generation.rawValue
+        )
+        XCTAssertEqual(simulation.generation, newSession.generation)
+    }
+
+    func testReconnectClearFailureIsRecoveredByStoppingAgain() async throws {
+        let device = try makeRecoveryDevice()
+        let boundary = RecoveryBoundary(device: device)
+        let adapter = PymobiledeviceAdapter(boundary: boundary)
+        let session = try await adapter.connect()
+        let simulation = SimulationStore(
+            device: adapter,
+            generation: session.generation,
+            scheduler: RecoveryScheduler()
+        )
+        await boundary.setTunnelStatus(.exited)
+        await boundary.failNextSet(transportClosedFailure())
+        await boundary.failNextClear()
+
+        await simulation.confirmPoint(
+            try DeviceCoordinate(latitude: 25, longitude: 121),
+            riskAccepted: true
+        )
+
+        guard case let .interrupted(_, _, failure) = simulation.state else {
+            return XCTFail("Expected interrupted after the reconnect clear failed")
+        }
+        XCTAssertEqual(failure, .clearFailed("reconnect clear failed"))
+        guard case .cleanupPending = await adapter.state else {
+            return XCTFail("Expected the adapter to keep cleanup ownership")
+        }
+
+        await simulation.stop()
+
+        XCTAssertEqual(simulation.state, .idle)
+        XCTAssertNil(simulation.activeSessionID)
+        guard case let .ready(finalSession) = await adapter.state else {
+            return XCTFail("Expected the second reconnect to reach ready")
+        }
+        XCTAssertEqual(simulation.generation, finalSession.generation)
+    }
+
     private func makeRecoveryDevice() throws -> USBDevice {
         try USBDevice(
             id: DeviceID("00008110-001234567890001E"),
@@ -158,6 +228,16 @@ final class DisconnectReconnectIntegrationTests: XCTestCase {
     }
 }
 
+private func transportClosedFailure() -> DeviceLocationError {
+    .transportClosed(
+        DeviceBackendFailure(
+            code: .transportClosed,
+            exceptionType: "ConnectionTerminatedError",
+            errorNumber: nil
+        )
+    )
+}
+
 private enum RecoveryBoundaryEvent: Equatable, Sendable {
     case startDVT(DeviceSessionGeneration)
     case set(DeviceSessionGeneration)
@@ -169,6 +249,8 @@ private actor RecoveryBoundary: PymobiledeviceBoundary {
     private(set) var events: [RecoveryBoundaryEvent] = []
     private(set) var setCount = 0
     private var shouldFailNextClear = false
+    private var nextSetFailure: DeviceLocationError?
+    private var tunnelLeaseState: DeviceTunnelLeaseState = .running
 
     init(device: USBDevice) {
         self.device = device
@@ -229,6 +311,10 @@ private actor RecoveryBoundary: PymobiledeviceBoundary {
         case .set:
             setCount += 1
             events.append(.set(generation))
+            if let nextSetFailure {
+                self.nextSetFailure = nil
+                throw nextSetFailure
+            }
         case .clear:
             events.append(.clear(generation))
             if shouldFailNextClear {
@@ -242,6 +328,30 @@ private actor RecoveryBoundary: PymobiledeviceBoundary {
     func shutdownDVT(generation: DeviceSessionGeneration) async throws {}
     func stopTunnel(_ lease: DeviceTunnelLease) async throws {}
     func reconcileTunnels() async throws {}
+
+    func tunnelStatus(
+        _ lease: DeviceTunnelLease
+    ) async throws -> DeviceTunnelStatus {
+        DeviceTunnelStatus(
+            leaseID: lease.id,
+            deviceID: lease.deviceID,
+            endpoint: lease.endpoint,
+            state: tunnelLeaseState,
+            diagnostics: DeviceTunnelDiagnostics(
+                terminationStatus: 0,
+                stderrTail: "",
+                stderrByteCount: 0
+            )
+        )
+    }
+
+    func setTunnelStatus(_ state: DeviceTunnelLeaseState) {
+        tunnelLeaseState = state
+    }
+
+    func failNextSet(_ failure: DeviceLocationError) {
+        nextSetFailure = failure
+    }
 
     func waitForSetCount(_ count: Int) async {
         while setCount < count {

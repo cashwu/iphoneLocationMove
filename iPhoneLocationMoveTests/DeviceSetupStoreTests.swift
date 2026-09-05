@@ -397,6 +397,10 @@ private actor FakeSetupDevice: DeviceSessionPreparing {
         context: DeviceMutationContext
     ) async throws {}
 
+    func reconnect() async throws -> PreparedDeviceSession {
+        throw DeviceLocationError.usbDisconnected
+    }
+
     func clearLocation(context: DeviceCleanupContext) async throws {}
     func shutdown(generation: DeviceSessionGeneration) async {}
     func teardownForQuit() async throws {}

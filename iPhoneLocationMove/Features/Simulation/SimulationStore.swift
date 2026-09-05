@@ -39,6 +39,9 @@ enum SimulationMode: Equatable, Sendable {
 enum SimulationStoreState: Equatable, Sendable {
     case idle
     case starting(mode: SimulationMode, sessionID: SimulationSessionID)
+    /// A user-initiated start is re-preparing the device after an unobserved
+    /// USB disconnect. Position is unknown and no cleanup is owned yet.
+    case reconnecting(mode: SimulationMode, sessionID: SimulationSessionID)
     case replacing(previousSessionID: SimulationSessionID?)
     case pointActive(PointSimulationSnapshot)
     case route(RouteSimulationSnapshot, failure: DeviceLocationError?)
@@ -55,7 +58,7 @@ final class SimulationStore: ObservableObject {
     @Published private(set) var state: SimulationStoreState = .idle
 
     private let device: any DeviceLocationClient
-    private let generation: DeviceSessionGeneration
+    private(set) var generation: DeviceSessionGeneration
     private let scheduler: any SimulationScheduling
     private let diagnosticLogger: any DiagnosticLogging
 
@@ -64,7 +67,7 @@ final class SimulationStore: ObservableObject {
     private var producerTask: Task<Void, Never>?
     private var inFlightMutation: Task<Void, Error>?
     private var inFlightToken: RouteUpdateToken?
-    private var commandInProgress = false
+    private(set) var userActionTask: Task<Void, Never>?
     private var lastMonotonicInstant: TimeInterval = 0
 
     init(
@@ -107,12 +110,15 @@ final class SimulationStore: ObservableObject {
         _ coordinate: DeviceCoordinate,
         riskAccepted: Bool
     ) async {
-        guard riskAccepted, !commandInProgress else {
+        guard riskAccepted, userActionTask == nil else {
             return
         }
-        commandInProgress = true
-        defer { commandInProgress = false }
+        try? await runUserAction { [self] in
+            await performConfirmPoint(coordinate)
+        }
+    }
 
+    private func performConfirmPoint(_ coordinate: DeviceCoordinate) async {
         await prepareForReplacement()
         let sessionID = SimulationSessionID()
         diagnosticLogger.record(
@@ -126,12 +132,10 @@ final class SimulationStore: ObservableObject {
         )
         state = .starting(mode: .point, sessionID: sessionID)
         do {
-            try await device.setLocation(
+            try await performInitialSet(
                 coordinate,
-                context: DeviceMutationContext(
-                    simulationSessionID: sessionID,
-                    generation: generation
-                )
+                sessionID: sessionID,
+                mode: .point
             )
             activeSessionID = sessionID
             state = .pointActive(
@@ -153,7 +157,7 @@ final class SimulationStore: ObservableObject {
                 event: "point.start_failed",
                 metadata: [
                     "sessionID": sessionID.rawValue.uuidString,
-                    "failure": String(describing: error),
+                    "failure": failureMetadata(for: error),
                 ]
             )
             publishInitialMutationFailure(error, candidateSessionID: sessionID)
@@ -166,12 +170,23 @@ final class SimulationStore: ObservableObject {
         roundTrip: Bool,
         riskAccepted: Bool
     ) async throws {
-        guard riskAccepted, !commandInProgress else {
+        guard riskAccepted, userActionTask == nil else {
             return
         }
-        commandInProgress = true
-        defer { commandInProgress = false }
+        try await runUserAction { [self] in
+            try await performStartRoute(
+                preview: preview,
+                speedKilometersPerHour: speedKilometersPerHour,
+                roundTrip: roundTrip
+            )
+        }
+    }
 
+    private func performStartRoute(
+        preview: RoutePreview,
+        speedKilometersPerHour: Double,
+        roundTrip: Bool
+    ) async throws {
         await prepareForReplacement()
         let sessionID = SimulationSessionID()
         diagnosticLogger.record(
@@ -197,12 +212,10 @@ final class SimulationStore: ObservableObject {
             from: preview.points[0].coordinate
         )
         do {
-            try await device.setLocation(
+            try await performInitialSet(
                 firstCoordinate,
-                context: DeviceMutationContext(
-                    simulationSessionID: sessionID,
-                    generation: generation
-                )
+                sessionID: sessionID,
+                mode: .route
             )
             let instant = await scheduler.now()
             try route.start(at: instant)
@@ -237,7 +250,7 @@ final class SimulationStore: ObservableObject {
                 event: "route.start_failed",
                 metadata: [
                     "sessionID": sessionID.rawValue.uuidString,
-                    "failure": String(describing: failure),
+                    "failure": failureMetadata(for: error),
                 ]
             )
             try route.startFailed(reason: interruptionReason(for: failure))
@@ -298,6 +311,15 @@ final class SimulationStore: ObservableObject {
     }
 
     func stop() async {
+        guard activeSessionID != nil, userActionTask == nil else {
+            return
+        }
+        try? await runUserAction { [self] in
+            await performStop()
+        }
+    }
+
+    private func performStop() async {
         guard let sessionID = activeSessionID else {
             return
         }
@@ -326,34 +348,101 @@ final class SimulationStore: ObservableObject {
             try await device.clearLocation(
                 context: DeviceCleanupContext(generation: generation)
             )
-            if let routeSession, routeSession.phase == .stopping {
-                try? routeSession.clearSucceeded()
+            finishStop(sessionID: sessionID)
+        } catch DeviceLocationError.usbDisconnected {
+            await reconnectForStop(sessionID: sessionID)
+        } catch {
+            publishStopFailure(
+                deviceFailure(from: error),
+                sessionID: sessionID,
+                loggedFailure: failureMetadata(for: error)
+            )
+        }
+    }
+
+    /// `reconnect()` only reaches ready after its own clear succeeds, so a
+    /// successful re-preparation is this stop's clear success.
+    private func reconnectForStop(sessionID: SimulationSessionID) async {
+        diagnosticLogger.record(
+            .warning,
+            category: "simulation",
+            event: "simulation.reconnect_started",
+            metadata: [
+                "sessionID": sessionID.rawValue.uuidString,
+                "trigger": "stop",
+            ]
+        )
+        do {
+            let session = try await device.reconnect()
+            guard activeSessionID == sessionID else {
+                return
             }
-            self.routeSession = nil
-            activeSessionID = nil
-            state = .idle
+            generation = session.generation
             diagnosticLogger.record(
                 .info,
                 category: "simulation",
-                event: "stopped",
-                metadata: ["sessionID": sessionID.rawValue.uuidString]
+                event: "simulation.reconnect_succeeded",
+                metadata: [
+                    "sessionID": sessionID.rawValue.uuidString,
+                    "generation": String(session.generation.rawValue),
+                ]
             )
+            finishStop(sessionID: sessionID)
         } catch {
-            let failure = deviceFailure(from: error)
+            let failure = reconnectFailure(from: error)
             diagnosticLogger.record(
                 .error,
                 category: "simulation",
-                event: "stop_failed",
+                event: "simulation.reconnect_failed",
                 metadata: [
                     "sessionID": sessionID.rawValue.uuidString,
-                    "failure": String(describing: failure),
+                    "failure": failureCaseName(failure),
                 ]
             )
-            if let routeSession, routeSession.phase == .stopping {
-                try? routeSession.clearFailed()
+            guard activeSessionID == sessionID else {
+                return
             }
-            state = .stopping(sessionID: sessionID, failure: failure)
+            publishStopFailure(
+                failure,
+                sessionID: sessionID,
+                loggedFailure: failureCaseName(failure)
+            )
         }
+    }
+
+    private func finishStop(sessionID: SimulationSessionID) {
+        if let routeSession, routeSession.phase == .stopping {
+            try? routeSession.clearSucceeded()
+        }
+        routeSession = nil
+        activeSessionID = nil
+        state = .idle
+        diagnosticLogger.record(
+            .info,
+            category: "simulation",
+            event: "stopped",
+            metadata: ["sessionID": sessionID.rawValue.uuidString]
+        )
+    }
+
+    private func publishStopFailure(
+        _ failure: DeviceLocationError,
+        sessionID: SimulationSessionID,
+        loggedFailure: String
+    ) {
+        diagnosticLogger.record(
+            .error,
+            category: "simulation",
+            event: "stop_failed",
+            metadata: [
+                "sessionID": sessionID.rawValue.uuidString,
+                "failure": loggedFailure,
+            ]
+        )
+        if let routeSession, routeSession.phase == .stopping {
+            try? routeSession.clearFailed()
+        }
+        state = .stopping(sessionID: sessionID, failure: failure)
     }
 
     func handleDeviceInterruption(_ interruption: DeviceInterruption) {
@@ -612,6 +701,128 @@ final class SimulationStore: ObservableObject {
         publishRouteState(failure: .transportFailure("Route orchestration failed"))
     }
 
+    /// Serializes every user action through one handle, so a start, a stop and
+    /// quit teardown can never interleave with a pending re-preparation.
+    private func runUserAction(
+        _ body: @escaping @MainActor () async throws -> Void
+    ) async throws {
+        let inner = Task<Result<Void, Error>, Never> {
+            do {
+                try await body()
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }
+        let outer = Task { [weak self] in
+            _ = await inner.value
+            self?.userActionTask = nil
+        }
+        userActionTask = outer
+        let result = await inner.value
+        // Waiting on `outer` guarantees every waiter resumes after the handle
+        // has been cleared, so `stopForQuit` never depends on task ordering.
+        await outer.value
+        try result.get()
+    }
+
+    /// Sends the first mutation of a user-initiated start, re-preparing the
+    /// device exactly once when it reports an unobserved USB disconnect.
+    private func performInitialSet(
+        _ coordinate: DeviceCoordinate,
+        sessionID: SimulationSessionID,
+        mode: SimulationMode
+    ) async throws {
+        do {
+            try await device.setLocation(
+                coordinate,
+                context: DeviceMutationContext(
+                    simulationSessionID: sessionID,
+                    generation: generation
+                )
+            )
+            return
+        } catch DeviceLocationError.usbDisconnected {
+            // Fall through to the single automatic re-preparation below.
+        }
+
+        state = .reconnecting(mode: mode, sessionID: sessionID)
+        diagnosticLogger.record(
+            .warning,
+            category: "simulation",
+            event: "simulation.reconnect_started",
+            metadata: [
+                "sessionID": sessionID.rawValue.uuidString,
+                "trigger": "start",
+            ]
+        )
+        let session: PreparedDeviceSession
+        do {
+            session = try await device.reconnect()
+        } catch {
+            let failure = reconnectFailure(from: error)
+            diagnosticLogger.record(
+                .error,
+                category: "simulation",
+                event: "simulation.reconnect_failed",
+                metadata: [
+                    "sessionID": sessionID.rawValue.uuidString,
+                    "failure": failureCaseName(failure),
+                ]
+            )
+            throw ReconnectFailure(failure: failure)
+        }
+        guard case let .reconnecting(_, currentSessionID) = state,
+              currentSessionID == sessionID
+        else {
+            throw DeviceLocationError.staleGeneration
+        }
+        generation = session.generation
+        diagnosticLogger.record(
+            .info,
+            category: "simulation",
+            event: "simulation.reconnect_succeeded",
+            metadata: [
+                "sessionID": sessionID.rawValue.uuidString,
+                "generation": String(session.generation.rawValue),
+            ]
+        )
+        state = .starting(mode: mode, sessionID: sessionID)
+        try await device.setLocation(
+            coordinate,
+            context: DeviceMutationContext(
+                simulationSessionID: sessionID,
+                generation: generation
+            )
+        )
+    }
+
+    /// The same iPhone not being plugged back in yet is still a USB
+    /// interruption, so the user sees the reconnect guidance rather than a
+    /// discovery error.
+    private func reconnectFailure(from error: Error) -> DeviceLocationError {
+        let failure = deviceFailure(from: error)
+        switch failure {
+        case .noUSBDevice, .deviceNotFound:
+            return .usbDisconnected
+        default:
+            return failure
+        }
+    }
+
+    /// `reconnect()` runs a full prepare, so its message may quote a backend
+    /// summary or a tunnel endpoint. Only the case name is safe to log.
+    private func failureCaseName(_ failure: DeviceLocationError) -> String {
+        String(String(describing: failure).prefix { $0 != "(" })
+    }
+
+    private func failureMetadata(for error: Error) -> String {
+        if error is ReconnectFailure {
+            return failureCaseName(deviceFailure(from: error))
+        }
+        return String(describing: deviceFailure(from: error))
+    }
+
     private func deviceCoordinate(from coordinate: RouteCoordinate) throws -> DeviceCoordinate {
         try DeviceCoordinate(
             latitude: coordinate.latitude,
@@ -620,6 +831,9 @@ final class SimulationStore: ObservableObject {
     }
 
     private func deviceFailure(from error: Error) -> DeviceLocationError {
+        if let reconnect = error as? ReconnectFailure {
+            return reconnect.failure
+        }
         if let typed = error as? DeviceLocationError {
             return typed
         }
@@ -665,4 +879,30 @@ final class SimulationStore: ObservableObject {
     }
 }
 
+/// Marks a failure as coming from the automatic re-preparation, so its log
+/// metadata is reduced to the case name.
+private struct ReconnectFailure: Error {
+    let failure: DeviceLocationError
+}
+
 extension SimulationStore: SystemSleepHandling {}
+
+extension SimulationStore: SimulationLifecycleControlling {
+    var hasActiveSimulation: Bool {
+        activeSessionID != nil || userActionTask != nil
+    }
+
+    var cleanupFailure: DeviceLocationError? {
+        if case let .stopping(_, failure) = state {
+            return failure
+        }
+        return nil
+    }
+
+    func stopForQuit() async {
+        while let task = userActionTask {
+            await task.value
+        }
+        await stop()
+    }
+}

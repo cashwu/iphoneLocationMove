@@ -125,6 +125,51 @@ final class AppShellTests: XCTestCase {
         )
     }
 
+    func testAutoReconnectKeepsSetupReadyAndAsksForNoNewMacLocation()
+        async throws
+    {
+        let harness = try AppShellHarness(
+            outcomes: [.ready(generation: 40)]
+        )
+        let provider = ControllableMacLocationProvider()
+        let coordinator = MacLocationCoordinator(provider: provider)
+        let window = hostWorkspace(
+            store: harness.store,
+            coordinator: coordinator
+        )
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+
+        await harness.store.start()
+        require(await provider.waitForRequestCount(1))
+        provider.succeedRequest(
+            at: 0,
+            with: coordinate(latitude: 25.04, longitude: 121.56)
+        )
+        require(await waitUntil { coordinator.coordinate != nil })
+        await drainMainActor()
+        let readyStateBeforeReconnect = harness.store.state
+        let simulation = try XCTUnwrap(harness.store.simulationStore)
+
+        await harness.device.failNextSet(.usbDisconnected)
+        await harness.device.enqueueReconnectResult(.ready(41))
+        await simulation.confirmPoint(
+            try DeviceCoordinate(latitude: 25, longitude: 121),
+            riskAccepted: true
+        )
+        await drainMainActor()
+
+        guard case .pointActive = simulation.state else {
+            return XCTFail("Expected the replayed set to publish point active")
+        }
+        XCTAssertEqual(simulation.generation, DeviceSessionGeneration(rawValue: 41))
+        XCTAssertEqual(harness.store.state, readyStateBeforeReconnect)
+        XCTAssertTrue(harness.store.simulationStore === simulation)
+        XCTAssertEqual(provider.requestCount, 1)
+    }
+
     func testSameStorePublicationsDriveReadyGenerationsWithoutDeviceMutation()
         async throws
     {
@@ -373,11 +418,18 @@ private actor AppShellAuthorizer: TunnelHelperAuthorizing {
     }
 }
 
+private enum AppShellReconnectResult: Sendable {
+    case ready(UInt64)
+    case failure(DeviceLocationError)
+}
+
 private actor AppShellDevice: DeviceSessionPreparing {
     let device: USBDevice
     private var outcomes: [AppShellConnectionOutcome]
     private var sessionState: DeviceSessionState = .disconnected
     private var setLocationCalls = 0
+    private var nextSetFailure: DeviceLocationError?
+    private var reconnectResults: [AppShellReconnectResult] = []
 
     init(
         device: USBDevice,
@@ -427,6 +479,35 @@ private actor AppShellDevice: DeviceSessionPreparing {
         context: DeviceMutationContext
     ) async throws {
         setLocationCalls += 1
+        if let nextSetFailure {
+            self.nextSetFailure = nil
+            throw nextSetFailure
+        }
+    }
+
+    func failNextSet(_ failure: DeviceLocationError) {
+        nextSetFailure = failure
+    }
+
+    func enqueueReconnectResult(_ result: AppShellReconnectResult) {
+        reconnectResults.append(result)
+    }
+
+    func reconnect() async throws -> PreparedDeviceSession {
+        guard !reconnectResults.isEmpty else {
+            throw DeviceLocationError.usbDisconnected
+        }
+        switch reconnectResults.removeFirst() {
+        case let .ready(rawGeneration):
+            let session = PreparedDeviceSession(
+                device: device,
+                generation: DeviceSessionGeneration(rawValue: rawGeneration)
+            )
+            sessionState = .ready(session)
+            return session
+        case let .failure(failure):
+            throw failure
+        }
     }
 
     func clearLocation(context: DeviceCleanupContext) async throws {}

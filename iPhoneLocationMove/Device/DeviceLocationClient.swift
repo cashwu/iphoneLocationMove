@@ -439,6 +439,9 @@ extension DeviceLocationError: LocalizedError {
 protocol DeviceLocationClient: Sendable {
     func discoverUSBDevices() async throws -> [USBDevice]
     func prepare(deviceID: DeviceID) async throws -> PreparedDeviceSession
+    /// Rebuilds the session for a device that was observed as disconnected,
+    /// under a new generation and only after a successful clear.
+    func reconnect() async throws -> PreparedDeviceSession
     func setLocation(
         _ coordinate: DeviceCoordinate,
         context: DeviceMutationContext

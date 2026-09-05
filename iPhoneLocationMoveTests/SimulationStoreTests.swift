@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import XCTest
 @testable import iPhoneLocationMove
@@ -765,6 +766,351 @@ final class SimulationStoreTests: XCTestCase {
         XCTAssertNil(harness.store.confirmedRouteMarkerCoordinate)
     }
 
+    // MARK: - Automatic re-preparation after an unobserved USB disconnect
+
+    func testPointStartReconnectsOnceAndReplaysWithTheNewGeneration() async throws {
+        let harness = try SimulationHarness()
+        let point = try DeviceCoordinate(latitude: 25.033, longitude: 121.5654)
+        await harness.device.enqueue(.failure(.usbDisconnected))
+        await harness.device.enqueueReconnect(.suspended)
+
+        let start = Task { await harness.store.confirmPoint(point, riskAccepted: true) }
+        await harness.device.waitForPendingReconnect()
+        XCTAssertEqual(harness.states.kinds.last, "reconnecting(point)")
+        await harness.device.completeNextSuspendedReconnect(
+            result: .success(DeviceSessionGeneration(rawValue: 7))
+        )
+        await start.value
+
+        XCTAssertEqual(
+            harness.states.kinds,
+            ["idle", "starting(point)", "reconnecting(point)", "starting(point)", "pointActive"]
+        )
+        let reconnectCount = await harness.device.recordedReconnectCallCount()
+        XCTAssertEqual(reconnectCount, 1)
+        let calls = await harness.device.recordedSetCalls()
+        XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(calls[1].coordinate, point)
+        XCTAssertEqual(calls[1].context.generation, DeviceSessionGeneration(rawValue: 7))
+        XCTAssertEqual(calls[0].context.simulationSessionID, calls[1].context.simulationSessionID)
+        guard case let .pointActive(snapshot) = harness.store.state else {
+            return XCTFail("Expected point active")
+        }
+        XCTAssertEqual(snapshot.sessionID, calls[0].context.simulationSessionID)
+    }
+
+    func testRouteStartReconnectsOnceAndRunsFromAWithTheSameSessionID() async throws {
+        let harness = try SimulationHarness()
+        await harness.device.enqueue(.failure(.usbDisconnected))
+        await harness.device.enqueueReconnect(
+            .success(DeviceSessionGeneration(rawValue: 9))
+        )
+
+        try await harness.store.startRoute(
+            preview: route(),
+            speedKilometersPerHour: 4.5,
+            roundTrip: false,
+            riskAccepted: true
+        )
+
+        XCTAssertEqual(
+            harness.states.kinds,
+            ["idle", "starting(route)", "reconnecting(route)", "starting(route)", "route"]
+        )
+        let reconnectCount = await harness.device.recordedReconnectCallCount()
+        XCTAssertEqual(reconnectCount, 1)
+        let calls = await harness.device.recordedSetCalls()
+        XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(calls[1].context.generation, DeviceSessionGeneration(rawValue: 9))
+        XCTAssertEqual(calls[0].context.simulationSessionID, calls[1].context.simulationSessionID)
+        guard case let .route(snapshot, nil) = harness.store.state else {
+            return XCTFail("Expected route state")
+        }
+        XCTAssertEqual(snapshot.phase, .running)
+        XCTAssertEqual(snapshot.confirmedDistance, 0)
+    }
+
+    func testReconnectFailureClassificationDrivesTheInterruptedFailure() async throws {
+        let expectations: [(DeviceLocationError, DeviceLocationError, InterruptionReason)] = [
+            (.noUSBDevice, .usbDisconnected, .usbDisconnected),
+            (.deviceNotFound, .usbDisconnected, .usbDisconnected),
+            (.deviceLocked, .deviceLocked, .transportFailure),
+        ]
+        for (thrown, expectedFailure, expectedReason) in expectations {
+            let harness = try SimulationHarness()
+            await harness.device.enqueue(.failure(.usbDisconnected))
+            await harness.device.enqueueReconnect(.failure(thrown))
+
+            await harness.store.confirmPoint(
+                try DeviceCoordinate(latitude: 25, longitude: 121),
+                riskAccepted: true
+            )
+
+            guard case let .interrupted(_, interruption, failure) = harness.store.state else {
+                return XCTFail("Expected interrupted after a failed reconnect")
+            }
+            XCTAssertEqual(failure, expectedFailure)
+            XCTAssertEqual(interruption.reason, expectedReason)
+            XCTAssertEqual(interruption.positionKnowledge, .unknown)
+            let setCount = await harness.device.setCallCount()
+            XCTAssertEqual(setCount, 1)
+        }
+    }
+
+    func testInterruptedRouteIsReplacedThroughReconnectWithANewSessionID() async throws {
+        let harness = try SimulationHarness()
+        try await harness.store.startRoute(
+            preview: route(),
+            speedKilometersPerHour: 4.5,
+            roundTrip: false,
+            riskAccepted: true
+        )
+        let routeID = try XCTUnwrap(harness.store.activeSessionID)
+        await harness.device.enqueue(.failure(.usbDisconnected))
+        try harness.store.tick(at: 1)
+        await eventually { harness.store.routeSnapshot?.phase == .interrupted }
+
+        await harness.device.enqueue(.failure(.usbDisconnected))
+        await harness.device.enqueueReconnect(
+            .success(DeviceSessionGeneration(rawValue: 5))
+        )
+        await harness.store.confirmPoint(
+            try DeviceCoordinate(latitude: 24, longitude: 120),
+            riskAccepted: true
+        )
+
+        let tail = Array(harness.states.kinds.suffix(5))
+        XCTAssertEqual(
+            tail,
+            ["replacing", "starting(point)", "reconnecting(point)", "starting(point)", "pointActive"]
+        )
+        let reconnectCount = await harness.device.recordedReconnectCallCount()
+        XCTAssertEqual(reconnectCount, 1)
+        guard case let .pointActive(snapshot) = harness.store.state else {
+            return XCTFail("Expected replacement point")
+        }
+        XCTAssertNotEqual(snapshot.sessionID, routeID)
+    }
+
+    func testASecondDisconnectAfterTheReplayInterruptsWithoutAnotherReconnect() async throws {
+        let harness = try SimulationHarness()
+        await harness.device.enqueue(.failure(.usbDisconnected))
+        await harness.device.enqueue(.failure(.usbDisconnected))
+        await harness.device.enqueueReconnect(
+            .success(DeviceSessionGeneration(rawValue: 4))
+        )
+
+        await harness.store.confirmPoint(
+            try DeviceCoordinate(latitude: 25, longitude: 121),
+            riskAccepted: true
+        )
+
+        guard case let .interrupted(_, interruption, failure) = harness.store.state else {
+            return XCTFail("Expected interrupted after the replay failed again")
+        }
+        XCTAssertEqual(failure, .usbDisconnected)
+        XCTAssertEqual(interruption, unknown(.usbDisconnected))
+        let reconnectCount = await harness.device.recordedReconnectCallCount()
+        XCTAssertEqual(reconnectCount, 1)
+        let setCount = await harness.device.setCallCount()
+        XCTAssertEqual(setCount, 2)
+    }
+
+    func testStopClearDisconnectReconnectsOnceAndCountsAsClearSuccess() async throws {
+        let harness = try SimulationHarness()
+        await harness.store.confirmPoint(
+            try DeviceCoordinate(latitude: 25, longitude: 121),
+            riskAccepted: true
+        )
+        await harness.device.enqueueClearFailure(.usbDisconnected)
+        await harness.device.enqueueReconnect(.suspended)
+
+        let stop = Task { await harness.store.stop() }
+        await harness.device.waitForPendingReconnect()
+        XCTAssertEqual(harness.store.state, .stopping(
+            sessionID: try XCTUnwrap(harness.store.activeSessionID),
+            failure: nil
+        ))
+        await harness.device.completeNextSuspendedReconnect(
+            result: .success(DeviceSessionGeneration(rawValue: 6))
+        )
+        await stop.value
+
+        XCTAssertEqual(harness.store.state, .idle)
+        XCTAssertNil(harness.store.activeSessionID)
+        let clearCount = await harness.device.recordedClearCallCount()
+        XCTAssertEqual(clearCount, 1)
+        let reconnectCount = await harness.device.recordedReconnectCallCount()
+        XCTAssertEqual(reconnectCount, 1)
+    }
+
+    func testStopReconnectFailureKeepsCleanupOwnershipAndIsRetryable() async throws {
+        let harness = try SimulationHarness()
+        await harness.store.confirmPoint(
+            try DeviceCoordinate(latitude: 25, longitude: 121),
+            riskAccepted: true
+        )
+        await harness.device.enqueueClearFailure(.usbDisconnected)
+        await harness.device.enqueueReconnect(.failure(.noUSBDevice))
+
+        await harness.store.stop()
+
+        guard case let .stopping(_, failure?) = harness.store.state else {
+            return XCTFail("Expected a retryable stopping failure")
+        }
+        XCTAssertEqual(failure, .usbDisconnected)
+
+        await harness.device.enqueueClearFailure(.usbDisconnected)
+        await harness.device.enqueueReconnect(
+            .success(DeviceSessionGeneration(rawValue: 8))
+        )
+        await harness.store.stop()
+
+        XCTAssertEqual(harness.store.state, .idle)
+        let clearCount = await harness.device.recordedClearCallCount()
+        XCTAssertEqual(clearCount, 2)
+        let reconnectCount = await harness.device.recordedReconnectCallCount()
+        XCTAssertEqual(reconnectCount, 2)
+    }
+
+    func testUserActionsDuringAPendingReconnectAreIgnored() async throws {
+        let harness = try SimulationHarness()
+        await harness.device.enqueue(.failure(.usbDisconnected))
+        await harness.device.enqueueReconnect(.suspended)
+        let start = Task {
+            await harness.store.confirmPoint(
+                try! DeviceCoordinate(latitude: 25, longitude: 121),
+                riskAccepted: true
+            )
+        }
+        await harness.device.waitForPendingReconnect()
+        let kindsDuringReconnect = harness.states.kinds
+
+        await harness.store.stop()
+        await harness.store.confirmPoint(
+            try DeviceCoordinate(latitude: 24, longitude: 120),
+            riskAccepted: true
+        )
+
+        XCTAssertEqual(harness.states.kinds, kindsDuringReconnect)
+        let reconnectDuringWait = await harness.device.recordedReconnectCallCount()
+        XCTAssertEqual(reconnectDuringWait, 1)
+
+        await harness.device.completeNextSuspendedReconnect(
+            result: .success(DeviceSessionGeneration(rawValue: 3))
+        )
+        await start.value
+        guard case .pointActive = harness.store.state else {
+            return XCTFail("Expected the original start to finish")
+        }
+    }
+
+    func testQuitWaitsForAPendingReconnectBeforeClearing() async throws {
+        let harness = try SimulationHarness()
+        await harness.device.enqueue(.failure(.usbDisconnected))
+        await harness.device.enqueueReconnect(.suspended)
+        let start = Task {
+            await harness.store.confirmPoint(
+                try! DeviceCoordinate(latitude: 25, longitude: 121),
+                riskAccepted: true
+            )
+        }
+        await harness.device.waitForPendingReconnect()
+        XCTAssertTrue(harness.store.hasActiveSimulation)
+
+        let quit = Task { await harness.store.stopForQuit() }
+        let queued = Task {
+            await harness.store.confirmPoint(
+                try! DeviceCoordinate(latitude: 24, longitude: 120),
+                riskAccepted: true
+            )
+        }
+        await Task.yield()
+        let clearsBeforeReconnect = await harness.device.recordedClearCallCount()
+        XCTAssertEqual(clearsBeforeReconnect, 0)
+
+        await harness.device.completeNextSuspendedReconnect(
+            result: .success(DeviceSessionGeneration(rawValue: 3))
+        )
+        await start.value
+        await queued.value
+        await quit.value
+
+        XCTAssertEqual(harness.store.state, .idle)
+        XCTAssertFalse(harness.store.hasActiveSimulation)
+        let clearCount = await harness.device.recordedClearCallCount()
+        XCTAssertEqual(clearCount, 1)
+    }
+
+    func testRunningRouteProducerFailureNeverReconnects() async throws {
+        let harness = try SimulationHarness()
+        try await harness.store.startRoute(
+            preview: route(),
+            speedKilometersPerHour: 4.5,
+            roundTrip: false,
+            riskAccepted: true
+        )
+        await harness.device.enqueue(.failure(.usbDisconnected))
+        try harness.store.tick(at: 1)
+        await eventually { harness.store.routeSnapshot?.phase == .interrupted }
+
+        XCTAssertEqual(
+            harness.store.routeSnapshot?.interruption,
+            unknown(.usbDisconnected)
+        )
+        let reconnectCount = await harness.device.recordedReconnectCallCount()
+        XCTAssertEqual(reconnectCount, 0)
+    }
+
+    func testReconnectingHidesTheConfirmedRouteMarker() async throws {
+        let harness = try SimulationHarness()
+        await harness.device.enqueue(.failure(.usbDisconnected))
+        await harness.device.enqueueReconnect(.suspended)
+        let start = Task {
+            try? await harness.store.startRoute(
+                preview: self.route(),
+                speedKilometersPerHour: 4.5,
+                roundTrip: false,
+                riskAccepted: true
+            )
+        }
+        await harness.device.waitForPendingReconnect()
+
+        XCTAssertEqual(harness.states.kinds.last, "reconnecting(route)")
+        XCTAssertNil(harness.store.confirmedRouteMarkerCoordinate)
+
+        await harness.device.completeNextSuspendedReconnect(
+            result: .success(DeviceSessionGeneration(rawValue: 3))
+        )
+        await start.value
+    }
+
+    func testReconnectFailureLogNeverCarriesTheTransportDetail() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let logger = DiagnosticLogger(directoryURL: directory)
+        let harness = try SimulationHarness(diagnosticLogger: logger)
+        let endpoint = "fd7e:5f3a:9c21::42"
+        let detail = "tunnel refused at [\(endpoint)]:62078"
+        await harness.device.enqueue(.failure(.usbDisconnected))
+        await harness.device.enqueueReconnect(.failure(.tunnelFailure(detail)))
+
+        await harness.store.confirmPoint(
+            try DeviceCoordinate(latitude: 25, longitude: 121),
+            riskAccepted: true
+        )
+
+        let serialized = String(
+            decoding: try Data(contentsOf: logger.fileURL),
+            as: UTF8.self
+        )
+        XCTAssertTrue(serialized.contains("simulation.reconnect_started"))
+        XCTAssertTrue(serialized.contains("simulation.reconnect_failed"))
+        XCTAssertFalse(serialized.contains(detail))
+        XCTAssertFalse(serialized.contains(endpoint))
+    }
+
     private func route() -> RoutePreview {
         try! RoutePreview(points: [
             RoutePoint(
@@ -811,16 +1157,65 @@ private final class FakeSystemSleepHandler: SystemSleepHandling {
 
 @MainActor
 private struct SimulationHarness {
-    let device = FakeSimulationDevice()
+    let device: FakeSimulationDevice
     let scheduler = FakeSimulationScheduler()
     let store: SimulationStore
+    let states: SimulationStateRecorder
 
-    init() throws {
+    init(diagnosticLogger: any DiagnosticLogging = NullDiagnosticLogger()) throws {
+        device = FakeSimulationDevice(
+            device: try USBDevice(
+                id: DeviceID("device-17"),
+                name: "iPhone",
+                operatingSystemVersion: OperatingSystemVersion(
+                    majorVersion: 17,
+                    minorVersion: 0,
+                    patchVersion: 0
+                )
+            )
+        )
         store = SimulationStore(
             device: device,
             generation: DeviceSessionGeneration(rawValue: 1),
-            scheduler: scheduler
+            scheduler: scheduler,
+            diagnosticLogger: diagnosticLogger
         )
+        states = SimulationStateRecorder(store: store)
+    }
+}
+
+/// Records every published simulation state so tests can assert the whole
+/// transition sequence, not just the state it happens to end on.
+@MainActor
+private final class SimulationStateRecorder {
+    private(set) var kinds: [String] = []
+    private var cancellable: AnyCancellable?
+
+    init(store: SimulationStore) {
+        cancellable = store.$state.sink { [weak self] state in
+            self?.kinds.append(stateKind(state))
+        }
+    }
+}
+
+private func stateKind(_ state: SimulationStoreState) -> String {
+    switch state {
+    case .idle:
+        "idle"
+    case let .starting(mode, _):
+        mode == .point ? "starting(point)" : "starting(route)"
+    case let .reconnecting(mode, _):
+        mode == .point ? "reconnecting(point)" : "reconnecting(route)"
+    case .replacing:
+        "replacing"
+    case .pointActive:
+        "pointActive"
+    case .route:
+        "route"
+    case .interrupted:
+        "interrupted"
+    case .stopping:
+        "stopping"
     }
 }
 
@@ -830,6 +1225,19 @@ private actor FakeSimulationDevice: DeviceLocationClient {
         case failure(DeviceLocationError)
         case suspended
         case suspendedDuringRecovery
+    }
+
+    /// What a queued `reconnect()` does when the store reaches it.
+    enum ReconnectBehavior: Equatable, Sendable {
+        case success(DeviceSessionGeneration)
+        case failure(DeviceLocationError)
+        case suspended
+    }
+
+    /// How a suspended `reconnect()` is finally answered.
+    enum ReconnectResult: Equatable, Sendable {
+        case success(DeviceSessionGeneration)
+        case failure(DeviceLocationError)
     }
 
     struct SetCall: Equatable, Sendable {
@@ -850,6 +1258,63 @@ private actor FakeSimulationDevice: DeviceLocationClient {
     private var clearFailures: [DeviceLocationError] = []
     private var concurrentSetCount = 0
     private(set) var maximumConcurrentSetCount = 0
+    private let device: USBDevice
+    private var reconnectBehaviors: [ReconnectBehavior] = []
+    private var pendingReconnect: CheckedContinuation<PreparedDeviceSession, Error>?
+    private(set) var reconnectCallCount = 0
+
+    init(device: USBDevice) {
+        self.device = device
+    }
+
+    func enqueueReconnect(_ behavior: ReconnectBehavior) {
+        reconnectBehaviors.append(behavior)
+    }
+
+    func recordedReconnectCallCount() -> Int {
+        reconnectCallCount
+    }
+
+    func waitForPendingReconnect() async {
+        while pendingReconnect == nil {
+            await Task.yield()
+        }
+    }
+
+    func completeNextSuspendedReconnect(result: ReconnectResult) {
+        guard let continuation = pendingReconnect else {
+            return
+        }
+        pendingReconnect = nil
+        switch result {
+        case let .success(generation):
+            continuation.resume(
+                returning: PreparedDeviceSession(
+                    device: device,
+                    generation: generation
+                )
+            )
+        case let .failure(error):
+            continuation.resume(throwing: error)
+        }
+    }
+
+    func reconnect() async throws -> PreparedDeviceSession {
+        reconnectCallCount += 1
+        let behavior = reconnectBehaviors.isEmpty
+            ? .failure(DeviceLocationError.usbDisconnected)
+            : reconnectBehaviors.removeFirst()
+        switch behavior {
+        case let .success(generation):
+            return PreparedDeviceSession(device: device, generation: generation)
+        case let .failure(error):
+            throw error
+        case .suspended:
+            return try await withCheckedThrowingContinuation { continuation in
+                pendingReconnect = continuation
+            }
+        }
+    }
 
     func enqueue(_ behavior: Behavior) {
         behaviors.append(behavior)
