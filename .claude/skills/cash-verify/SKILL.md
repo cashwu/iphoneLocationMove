@@ -94,8 +94,9 @@ Verify that an implementation matches the change artifacts (specs, tasks, design
      - Recommendation: "Complete task: <description>" or "Mark as done if already implemented"
 
    **Spec Coverage**:
+   - Parse the enclosing delta operation before evaluating coverage. For ADDED and MODIFIED, verify the required resulting behavior using the checks below. For REMOVED, verify that the removed obligation or behavior is absent as specified, including any migration expectations; do not demand its former implementation or scenarios. For RENAMED, verify the FROM/TO identity transition and preserved behavior, accounting for any accompanying MODIFIED block. Do not count a rename as a missing new implementation. Apply this operation-aware interpretation to all completeness, correctness, scenario, and example checks.
    - If delta specs exist in `openspec/changes/<name>/specs/`:
-     - Extract all requirements (marked with "### Requirement:")
+     - Extract ADDED and MODIFIED requirements (marked with "### Requirement:"); evaluate REMOVED and RENAMED separately as described above
      - For each requirement:
        - Search codebase for keywords related to the requirement
        - Assess if implementation likely exists
@@ -106,7 +107,7 @@ Verify that an implementation matches the change artifacts (specs, tasks, design
 6. **Verify Correctness**
 
    **Requirement Implementation Mapping**:
-   - For each requirement from delta specs:
+   - For each ADDED or MODIFIED requirement from delta specs:
      - Search codebase for implementation evidence
      - If found, note file paths and line ranges
      - Assess if implementation matches requirement intent
@@ -115,7 +116,7 @@ Verify that an implementation matches the change artifacts (specs, tasks, design
        - Recommendation: "Review <file>:<lines> against requirement X"
 
    **Scenario Coverage**:
-   - For each scenario in delta specs (marked with "#### Scenario:"):
+   - For each scenario in ADDED or MODIFIED requirements (marked with "#### Scenario:"):
      - Check if conditions are handled in code
      - Check if tests exist covering the scenario
      - If scenario appears uncovered:
@@ -123,7 +124,7 @@ Verify that an implementation matches the change artifacts (specs, tasks, design
        - Recommendation: "Add test or implementation for scenario: <description>"
 
    **Example Traceability**:
-   - For each `##### Example:` in delta specs:
+   - For each `##### Example:` in ADDED or MODIFIED requirements:
      - Check if a test exists that uses the same input values from the example's GIVEN/WHEN/THEN
      - If the example has a table, check if parameterized tests cover all rows
      - If examples appear untested, add WARNING: "Spec example not covered by test: <example name>" with recommendation to add a test using the GIVEN/WHEN/THEN from the example

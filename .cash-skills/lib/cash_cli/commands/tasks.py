@@ -384,7 +384,12 @@ def _task_entries(content: str) -> list[tuple[int, str, str, bool]]:
     return entries
 
 
-def mark_task_done(workspace: Workspace, name: str, task_id: str) -> dict[str, object]:
+def mark_task_done(
+    workspace: Workspace,
+    name: str,
+    task_id: str,
+    paths: Sequence[str] | None = None,
+) -> dict[str, object]:
     change = workspace.change_path(name)
     tasks_relative = f"openspec/changes/{name}/tasks.md"
     content = workspace.read_text(tasks_relative)
@@ -393,6 +398,8 @@ def mark_task_done(workspace: Workspace, name: str, task_id: str) -> dict[str, o
     if len(matches) != 1:
         raise CashError("task_not_found", f"Unknown or duplicate task id: {task_id}")
     line_index, _, description, already_done = matches[0]
+    if paths is None and _TASK.fullmatch(content.splitlines()[line_index]).group(2):
+        raise CashError("invalid_arguments", "Parallel tasks require --path or --no-files.")
     snapshot_relative = _state_relative("snapshots", name)
     if not workspace.exists(snapshot_relative):
         raise CashError(
@@ -411,6 +418,25 @@ def mark_task_done(workspace: Workspace, name: str, task_id: str) -> dict[str, o
         ],
         key=lambda path: path.encode("utf-8"),
     )
+    if paths is not None:
+        prior = load_or_import_touched(workspace, name)
+        prior_files = {
+            path
+            for entry in prior["touched"]
+            if entry["task_id"] == task_id
+            for path in entry["files"]
+        }
+        selected = set()
+        for path in paths:
+            canonical = _safe_source_path(path)
+            if (
+                canonical != Path(canonical).as_posix()
+                or canonical.startswith(_IGNORED_PREFIXES)
+                or canonical not in current and canonical not in baseline and canonical not in prior_files
+            ):
+                raise CashError("touched_invalid", "Explicit task path must be canonical and have dirty, snapshot, or same-task attribution evidence.")
+            selected.add(canonical)
+        changed = sorted(selected, key=lambda path: path.encode("utf-8"))
     touched = ensure_touched(workspace, name)
     items = list(touched["touched"])
     existing = next((item for item in items if item["task_id"] == task_id), None)
@@ -436,10 +462,23 @@ def mark_task_done(workspace: Workspace, name: str, task_id: str) -> dict[str, o
     lines = content.splitlines(keepends=True)
     if not already_done:
         lines[line_index] = lines[line_index].replace("- [ ]", "- [x]", 1)
+    # Explicit completion consumes only this task's paths. Sibling task edits
+    # remain available to later completion calls, including automatic ones.
+    next_baseline = current
+    if paths is not None:
+        next_baseline = baseline.copy()
+        for path in changed:
+            if path in current:
+                next_baseline[path] = current[path]
+            else:
+                next_baseline.pop(path, None)
     updated_snapshot = {
         "version": 1,
         "change": name,
-        "paths": list(current.values()),
+        "paths": [
+            next_baseline[path]
+            for path in sorted(next_baseline, key=lambda path: path.encode("utf-8"))
+        ],
     }
     transaction = workspace.transaction()
     transaction.write(tasks_relative, "".join(lines).encode("utf-8"))
@@ -447,13 +486,6 @@ def mark_task_done(workspace: Workspace, name: str, task_id: str) -> dict[str, o
     transaction.write(snapshot_relative, _json_bytes(updated_snapshot))
     transaction.commit()
     return updated_touched
-
-
-def _option(arguments: Sequence[str], name: str) -> str:
-    try:
-        return arguments[arguments.index(name) + 1]
-    except (ValueError, IndexError) as error:
-        raise CashError("invalid_arguments", f"{name} requires a value.") from error
 
 
 def execute(command: str, arguments: Sequence[str]) -> int:
@@ -541,11 +573,38 @@ def execute(command: str, arguments: Sequence[str]) -> int:
             transaction.write(relative, _json_bytes(updated))
             transaction.commit()
         return 0
-    if len(arguments) < 3 or arguments[0] != "done":
+    if not arguments or arguments[0] != "done":
         raise CashError("invalid_arguments", "Expected task done --change <name> <task-id>.")
-    name = _option(arguments, "--change")
-    task_id = arguments[-1]
-    value = mark_task_done(workspace, name, task_id)
-    if "--json" in arguments:
+    name = task_id = None
+    paths: list[str] = []
+    no_files = output_json = False
+    index = 1
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument in {"--change", "--path"}:
+            if index + 1 >= len(arguments):
+                raise CashError("invalid_arguments", f"{argument} requires a value.")
+            value = arguments[index + 1]
+            if argument == "--change":
+                if name is not None:
+                    raise CashError("invalid_arguments", "Duplicate --change.")
+                name = value
+            else:
+                paths.append(value)
+            index += 2
+            continue
+        if argument == "--no-files" and not no_files:
+            no_files = True
+        elif argument == "--json" and not output_json:
+            output_json = True
+        elif not argument.startswith("-") and task_id is None:
+            task_id = argument
+        else:
+            raise CashError("invalid_arguments", f"Unexpected task argument: {argument}")
+        index += 1
+    if not name or task_id is None or (no_files and paths):
+        raise CashError("invalid_arguments", "Expected task done --change <name> <task-id> [--path <path> ... | --no-files] [--json].")
+    value = mark_task_done(workspace, name, task_id, paths if paths or no_files else None)
+    if output_json:
         print(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
     return 0

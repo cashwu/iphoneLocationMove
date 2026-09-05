@@ -26,7 +26,7 @@ Audit changed code for security sharp edges in a Claude Code fork. This generate
 
 ## Claude fork context
 
-Run `git diff HEAD` to gather the current changes. If there are no changes, report that no security sharp edges were found and stop.
+Run `git diff HEAD` to gather tracked changes, then run `git ls-files --others --exclude-standard -z` from the project root and read the untracked source/configuration files in the requested audit scope as new-file changes. Do not stage files to inspect them. Stop with "No changes to audit" only when both sets are empty; a command/read failure must be reported as incomplete audit coverage, never as a clean result.
 
 Analyze the diff through the Scoundrel, Lazy Developer, and Confused Developer lenses. Return a consolidated report with findings grouped by severity, affected files, and recommended fixes. The main thread decides whether to apply any fixes.
 

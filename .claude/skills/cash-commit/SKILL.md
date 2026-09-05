@@ -102,13 +102,17 @@ This is a **utility skill** (not a workflow step). It reads source file tracking
 
 3. **Collect artifact files**
 
-   Run `git status --porcelain` and filter the output to files under `openspec/changes/<name>/`. These are the change's artifact files (proposal, design, tasks, specs, etc.).
+   From the project root, run `git status --porcelain=v1 -z --untracked-files=all`. Parse NUL-delimited records, not lines or whitespace: each record starts with the two-character status and one space, followed by the raw path. Rename/copy records contain a second NUL field: the first path is the destination, the second is the source and has no status prefix. Do not strip characters from the second field or interpret paths as C-quoted strings. Preserve spaces, Unicode, and embedded newlines in paths.
+
+   Build an individual-file dirty set covering staged, unstaged, and untracked changes. Treat a rename as destination addition plus source deletion, so both paths are shown and evaluated against the allowlist independently. A copy's unchanged source is context only, not a dirty path. Never stage a directory entry or silently include a rename endpoint outside the confirmed set. Command failure, unmerged entries, or malformed/incomplete records stop the workflow before staging.
+
+   Filter the parsed dirty set to files under `openspec/changes/<name>/`. These are the change's artifact files (proposal, design, tasks, specs, etc.). All later status reads in this workflow MUST use the same command and parsing rules.
 
    When step 2a applies, use the artifact set it rebuilt instead of this filter.
 
 4. **Identify unrelated dirty files**
 
-   From the full `git status --porcelain` output, any dirty files NOT in the artifact set and NOT in the tracking file are "unrelated changes."
+   From the parsed dirty set in step 3, any dirty files NOT in the artifact set and NOT in the tracking file are "unrelated changes."
 
    As an explicit exception, a shared signal file excluded by the user's decision belongs in Unrelated Changes even though it remains in the tracking file. Preserve the `user-decision: excluded shared signal` note.
 
@@ -208,11 +212,11 @@ This is a **utility skill** (not a workflow step). It reads source file tracking
 
     After archive completes successfully:
 
-    1. Re-run `git status --porcelain` only to identify allowlisted archive outputs. Do not treat the full post-archive dirty state as archive output.
-    2. Add only these archive-related file changes to the commit set:
+    1. Re-run `git status --porcelain=v1 -z --untracked-files=all` using step 3's parsing rules only to identify allowlisted archive outputs. Do not treat the full post-archive dirty state as archive output.
+    2. Replace the pre-archive artifact set with the following actual post-archive dirty paths; do not merely append them to the old set. Retain the confirmed source/review-loop sets and other customizations, intersected with the current dirty set. An old untracked artifact moved into archive is absent, not a Git deletion, and MUST NOT remain as a staging target. Resolve the exact destination returned by this archive rather than selecting unrelated archive directories. Preserve explicit artifact exclusions across the move by mapping their old relative suffix to that destination; show excluded paths under Unrelated Changes. Rebuild from only:
        - Deletions under `openspec/changes/<name>/`
        - Additions or modifications under `openspec/changes/archive/<date>-<change>/`
-       - Changes under `openspec/specs/` only when 6a-ii recorded the outcome `synced`
+       - Changes under `openspec/specs/` only when 6a-ii recorded the outcome `synced`, and only paths in the successful archive's `archive-manifest.json` `master_digests` whose current SHA-256 equals the recorded digest. Reuse step 2a's spec sync set rules. Other dirty master specs remain Unrelated Changes; directory membership alone is not attribution. If the manifest cannot be read or validated, stop before staging.
     3. Keep all other post-archive dirty files in Unrelated Changes unless they were part of the pre-archive confirmed commit set
     4. Display an **updated commit plan** showing all sections:
 
@@ -250,7 +254,7 @@ This is a **utility skill** (not a workflow step). It reads source file tracking
 
 7. **Generate commit message**
 
-   Read the proposal file at `openspec/changes/<name>/proposal.md`. Extract the first sentence from the Why section (or Problem/Summary section if Why is absent). When step 2a applies, read the proposal and the tasks file from the resolved archive directory instead — the active change directory no longer exists.
+   Read the proposal file at `openspec/changes/<name>/proposal.md`. Extract the first sentence from the Why section (or Problem/Summary section if Why is absent). When step 2a applies OR step 6a archived the change in this invocation, read the proposal and the tasks file from the resolved archive directory instead — the active change directory no longer exists. For step 6a, retain the successful archive destination and use it for both reads.
 
    Generate a message in this format:
 
@@ -277,20 +281,26 @@ This is a **utility skill** (not a workflow step). It reads source file tracking
 
 8. **Selective staging**
 
+   Before staging, run `git diff --cached --name-only -z --no-renames` from the project root and compare every staged path with the confirmed commit set. If any staged path is outside that set, stop and report those paths; do not unstage, reset, or commit them. Preserve the user's index and ask them to resolve the unrelated staged entries before retrying. A failed command or malformed output also stops the workflow.
+
    Stage each confirmed file individually:
 
    ```bash
-   git add <file1>
-   git add <file2>
+   git --literal-pathspecs add -- <file1>
+   git --literal-pathspecs add -- <file2>
    ...
    ```
 
    **NEVER use `git add .` or `git add -A`.** Each file must be staged explicitly.
 
+   Pass each raw path as a separately quoted argument, including rename source deletions when confirmed. Do not split filenames on whitespace, expand glob characters, or pass the display form `old -> new` as a path.
+
 9. **Commit**
 
+   Immediately before committing, repeat the staged-path check above and require the staged path set to equal the confirmed dirty commit set. On any mismatch, stop without committing. Use a commit-message file and `--file` so multiline text and shell metacharacters are preserved literally.
+
    ```bash
-   git commit -m "<message>"
+   git commit --file <message-file>
    ```
 
 10. **Show result**

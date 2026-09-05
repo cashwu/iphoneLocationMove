@@ -25,7 +25,7 @@ Update an existing Cash change — from a plan file or conversation context.
 
 **Prerequisites**: The project-local launcher initialized above is required. If root resolution, launcher validation, or a Cash command fails, report the exact error and STOP.
 
-**Input**: Optionally specify a plan file path or name.
+**Input**: Optionally specify an existing change name, or a plan file path or name. An existing change name selects the update target and uses conversation context as the requirement source.
 
 - `/cash-ingest ~/.claude/plans/agile-discovering-rocket.md`
 - `/cash-ingest agile-discovering-rocket`
@@ -36,6 +36,8 @@ Update an existing Cash change — from a plan file or conversation context.
 **Steps**
 
 1. **Locate the requirement source**
+
+   First, when an argument is provided, run `"$cash_cli" list --json` and `"$cash_cli" list --parked --json`. If it exactly matches an active or parked change name, retain that explicit target and use conversation context, then go to Step 3. This change-name match takes precedence over plan-file resolution below; an explicit path such as `./update-plan.md` selects a plan instead. If the context lacks the requested update, ask for that information; do not interpret the selected change as a missing plan file.
 
    a. **Argument provided** → treat as plan file reference (prepend `~/.claude/plans/` and append `.md` if needed)
    - If the file exists → use it as the plan file source, proceed to Step 2
@@ -91,8 +93,9 @@ Update an existing Cash change — from a plan file or conversation context.
    ```
 
    Parse both JSON outputs to get the full list of changes (active + parked). Parked changes should be annotated with "(parked)" in any selection list.
-   - If one change exists (active or parked) → use the **AskUserQuestion tool** to confirm updating it
-   - If multiple changes exist → use the **AskUserQuestion tool** to let user pick which one to update
+   - If Step 1 retained an explicit target → use that target without asking the user to select again; Step 4's parked handling still applies
+   - Otherwise, if one change exists (active or parked) → use the **AskUserQuestion tool** to confirm updating it
+   - Otherwise, if multiple changes exist → use the **AskUserQuestion tool** to let user pick which one to update
    - If no changes at all (neither active nor parked) → tell the user: "No active change found. Use `/cash-propose` first to create one." and **stop**
 
 4. **Select the change**
@@ -144,10 +147,11 @@ Update an existing Cash change — from a plan file or conversation context.
    | Discussion phases    | tasks.md groups  | One topic = one `##` heading       |
 
    **When updating an existing change:**
-   - Merge new context into existing proposal (don't replace)
-   - Add new tasks from plan stages or conversation, **preserve completed `[x]` items**
+   - Merge new context into the existing artifacts and preserve unrelated content. When the user explicitly changes a requirement, scope, or approach, update or remove the superseded proposal, design, delta spec, and incomplete task content consistently; do not leave contradictory instructions active.
+   - Add new tasks from plan stages or conversation, **preserve completed `[x]` items** unchanged as historical evidence. If a new decision reverses completed work, add a new pending migration or reversal task instead of deleting, rewriting, or unchecking the completed task.
    - **Preserve existing `[P]` markers** on tasks that still qualify
-   - Do NOT remove existing content
+   - Remove or replace incomplete content only when supported by an explicit decision in the requirement source. Without that decision, preserve the content and ask about the conflict. Record what was superseded, the decision, and the affected artifacts in the change's design decision history (or proposal when no design exists), and include it in the final summary.
+   - Preserve existing review records, implementation notes, and touched task attribution. Before rewriting or removing a pending task, check any existing `.cash-skills/state/touched/<change-name>.json` entries: if its exact description is already a `task_desc`, preserve that task and report the attribution conflict rather than silently changing the description or deleting its tracking entry. Existing explicit recovery guidance for a missing historical task still applies.
 
    **Parallel task markers (`[P]`)**: When creating or updating the **tasks** artifact, first read `.cash.yaml`. If `parallel_tasks: true` is set, add `[P]` markers to new tasks that can be executed in parallel. Format: `- [ ] [P] Task description`. A task qualifies for `[P]` if it targets different files from other pending tasks AND has no dependency on incomplete tasks in the same group. When `parallel_tasks` is not enabled, do NOT add `[P]` markers — but still preserve any existing `[P]` markers already in the file.
 
@@ -192,9 +196,10 @@ Update an existing Cash change — from a plan file or conversation context.
 
    **Check 5: Preservation Check** (ingest-specific)
    - Are all completed tasks `[x]` still present and unchanged?
-   - Are completed tasks still relevant to the updated scope? If new context conflicts with one, report the conflict without rewriting the completed task.
+   - If new context reverses completed work, is the original task preserved and the newly required migration or reversal represented by a pending task?
    - Were existing `[P]` markers preserved on tasks that still qualify?
-   - Was existing content merged (not replaced)?
+   - Was unrelated content preserved, and was every removal or replacement of incomplete content justified by an explicit decision and recorded in the decision history?
+   - Do proposal, design, delta specs, and pending tasks agree on the updated scope, without superseded instructions remaining active? Are historical records and touched task descriptions preserved?
 
    **Check 6: Durable Handoff Review** (run BEFORE the CLI analyzer)
 

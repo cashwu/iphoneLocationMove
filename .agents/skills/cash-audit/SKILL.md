@@ -42,9 +42,9 @@ When invoked directly as `$cash-audit`:
 
 ### Phase 1: Gather Changes
 
-Run `git diff HEAD` to get the full diff of current modifications.
+Run `git diff HEAD` to gather tracked changes, then run `git ls-files --others --exclude-standard -z` from the project root and read the untracked source/configuration files in the requested audit scope as new-file changes. Include both sets in every reviewer's context. Do not stage files to inspect them.
 
-If there are no changes, report "No changes to audit" and stop.
+If both sets are empty, report "No changes to audit" and stop. A command/read failure must be reported as incomplete audit coverage, never as a clean result.
 
 ### Phase 2: Parallel 3-Agent Analysis
 
@@ -86,15 +86,16 @@ Search the diff for:
 - Configuration cliffs: one wrong value = catastrophe with no warning (e.g., `verify_ssl: fasle`)
 - Stringly-typed security: permissions as comma-separated strings instead of enums
 
-### Phase 3: Consolidate and Fix
+### Phase 3: Consolidate and Report
 
 Merge findings from all 3 agents. For each finding:
 
-- If fixable: apply the fix directly
+- Report actionable findings with affected paths, evidence, and recommended fixes. An audit-only request does not authorize edits.
+- Apply fixes only when the user explicitly requested them in this session. After each fix, run verification appropriate to the affected behavior and inspect the resulting diff for regressions. If tests are added or modified, fetch `"$cash_cli" instructions --skill test-quality` before editing them. Report verification results and any unresolved findings; do not claim a fix is verified when checks failed or could not run.
 - If false positive or not worth changing: skip without debate
 - Classify severity: Critical / High / Medium / Low
 
-End with a brief summary of what was fixed (or confirm the code is clean).
+End with a brief findings summary and audit coverage. When fixes were authorized, also summarize what changed and its verification evidence.
 
 ---
 

@@ -98,23 +98,22 @@ Detect drift between a Cash change and the current codebase state. Reports time 
 4. **Apply the recommendation interactively**
 
    Use the **AskUserQuestion tool** to offer one decision based on `severity`. Use plain-language option labels while preserving the exact command in each option description. Do NOT auto-invoke `/cash-apply`, `/cash-ingest`, or `"$cash_cli" archive`; always wait for the user's choice.
-   - **Light** (score 0-3, drift is minor):
+   Use the returned `severity` as the routing authority; do not recompute severity from score or anchor percentages. The current CLI thresholds are light below 30, medium from 30 to below 60, and heavy at 60 or above.
+   - **Light** (drift is minor):
      - Recommended label: "Directly start work"
        - Description: run `/cash-apply <name>`
      - Alternate label: "Pause for now"
        - Description: do nothing until the user reviews manually
-   - **Medium** (score 4-8, refresh worth doing):
+   - **Medium** (refresh worth doing):
      - Recommended label: "Refresh the plan"
        - Description: run `/cash-ingest <name>` with the broken references and task collisions as context
      - Alternate label: "Directly start work"
        - Description: run `/cash-apply <name>` only if the user knows the reported changes are harmless
      - Alternate label: "Pause for now"
        - Description: do nothing until the user reviews manually
-   - **Heavy** (score >8 or anchor decay >30%, design diverges from code):
-     - Recommended label: "Archive and restart"
-       - Description: recommended next skill: `<primary_recommendation>`
-     - Alternate label: "Refresh the plan"
-       - Description: try `/cash-ingest <name>` before restarting
+   - **Heavy** (design diverges from code):
+     - Recommended label: "Refresh the plan"
+       - Description: run `/cash-ingest <name>` with the drift findings as context, matching the CLI's `primary_recommendation`. This updates the existing change; it does not archive or restart it.
      - Alternate label: "Pause for now"
        - Description: do nothing until the user reviews manually
 

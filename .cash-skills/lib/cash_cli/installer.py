@@ -21,7 +21,7 @@ from typing import Iterable
 from .config import ConfigError, parse_cash_config, parse_openspec_config
 
 
-BUNDLE_VERSION = "2.18.1"
+BUNDLE_VERSION = "2.21.0"
 VERSION_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 MODE_RE = re.compile(r"0[0-7]{3}\Z")
@@ -2293,6 +2293,7 @@ def install_vendored_target(
     dry_run: bool,
     force: bool,
     announce_tracking: bool = True,
+    require_manifest: bool = False,
 ) -> str:
     if sys.version_info < (3, 11):
         raise InstallerError("Cash installer requires Python 3.11+")
@@ -2333,6 +2334,15 @@ def install_vendored_target(
 
     manifest_snapshot: Snapshot
     manifest: PortableManifest | None = None
+    if require_manifest and not path_is_present(target, PORTABLE_MANIFEST_PATH):
+        # The batch dispatcher selected this path from a manifest it observed
+        # before this call. Losing the manifest in between would silently turn
+        # the run into a receipt conversion or a receiptless adoption, both of
+        # which may only happen through an explicit --vendor invocation.
+        raise InstallerError(
+            "portable manifest disappeared before classification; "
+            "publish this target with --vendor"
+        )
     if path_is_present(target, PORTABLE_MANIFEST_PATH):
         ensure_regular_shape(target, PORTABLE_MANIFEST_PATH)
         manifest_snapshot = optional_snapshot(target, PORTABLE_MANIFEST_PATH)
@@ -2399,6 +2409,7 @@ def install_vendored_target(
                 dry_run=dry_run,
                 force=force,
                 announce_tracking=False,
+                require_manifest=require_manifest,
             )
 
     source_config, _ = read_regular(source, ".cash.yaml", expected_mode=0o644)
@@ -2962,6 +2973,33 @@ def registry_path() -> Path:
     return safe_home() / ".config" / "cash-skills" / "projects.txt"
 
 
+def registry_publication_mode(source: Path, record: str) -> str:
+    """Decide which publication path one registry record takes.
+
+    This is a dispatch decision, not a property of the target: the canonical
+    source carries a regular manifest yet is answered "receipt" so that the
+    receipt path keeps producing its existing non-source diagnostic for a
+    hand-edited registry record.
+
+    Read-only and never raising: the whole body is evaluated inside one try so
+    that an unreadable, malformed or unsafe target falls through to the
+    receipt-based catch-all, where the existing publication path produces its
+    own diagnostic. Only a manifest that is both present and a regular file
+    selects the vendored path, because that path reads the manifest before
+    validating its shape and opening a FIFO would block forever.
+    """
+    try:
+        target = Path(record).resolve()
+        if target == source:
+            return "receipt"
+        if path_is_present(target, PORTABLE_MANIFEST_PATH):
+            ensure_regular_shape(target, PORTABLE_MANIFEST_PATH)
+            return "vendor"
+        return "receipt"
+    except Exception:
+        return "receipt"
+
+
 def read_registry() -> list[str]:
     root = safe_home()
     path = registry_path()
@@ -3127,10 +3165,6 @@ def run(arguments: list[str] | None = None) -> int:
             Path(project),
             allow_missing_config=True,
         )
-        if path_is_present(Path(project), PORTABLE_MANIFEST_PATH):
-            raise InstallerError(
-                "target is managed by a portable manifest; use --vendor"
-            )
         if project not in records:
             records.append(project)
             write_registry(records)
@@ -3155,13 +3189,25 @@ def run(arguments: list[str] | None = None) -> int:
         "failed": 0,
     }
     for record in records:
+        suffix = ""
         try:
-            result = install_target(
-                source,
-                record,
-                dry_run=options.dry_run,
-                force=options.force,
-            )
+            mode = registry_publication_mode(source, record)
+            suffix = " (vendored)" if mode == "vendor" else ""
+            if mode == "vendor":
+                result = install_vendored_target(
+                    source,
+                    record,
+                    dry_run=options.dry_run,
+                    force=options.force,
+                    require_manifest=True,
+                )
+            else:
+                result = install_target(
+                    source,
+                    record,
+                    dry_run=options.dry_run,
+                    force=options.force,
+                )
             label = "would-update" if options.dry_run and result == "update" else (
                 "updated" if result == "update" else result
             )
@@ -3169,7 +3215,7 @@ def run(arguments: list[str] | None = None) -> int:
             label = error.result or "failed"
             print(f"{record}: {error}", file=sys.stderr)
         counts[label] += 1
-        print(f"{label}: {record}")
+        print(f"{label}: {record}{suffix}")
     print(
         "Summary: "
         + " ".join(f"{key}={value}" for key, value in counts.items())

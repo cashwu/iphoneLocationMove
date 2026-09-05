@@ -100,11 +100,17 @@ If no argument is provided, the workflow will extract requirements from conversa
 
 4. **Create the change directory**
 
+   Before creation, resolve whether the selected name is active, parked, archived, or absent using `"$cash_cli" list --json` and `"$cash_cli" list --parked --json`, and inspect an existing active change's status and artifacts. An explicit request to continue a named active change selects resume without another confirmation. If the name merely collides with a newly derived name, ask whether to resume or choose another name. Parked changes require an explicit unpark decision before resuming; archived identities are historical and must not be overwritten or reused.
+
+   **Resume branch**: do not run `new change`. Read existing artifacts and `"$cash_cli" status --change "<name>" --json`; retain the existing schema, TDD choice, completed tasks, and review history. If the requested requirement changes existing scope or decisions, hand off to `/cash-ingest <name>` with the agreed update and end this propose run. Otherwise continue step 4b, skip creation of every existing artifact, and create only missing artifacts in dependency order. Inventory expected capability spec paths from the proposal even when CLI status reports specs as done; fill missing capability files before treating `applyRequires` as complete. Validate the completed set and use the existing review re-run rules; allocate round filenames after the highest existing number even when the previous run passed, and never overwrite completed round files.
+
+   **New branch**: only when the name is absent, run:
+
    ```bash
    "$cash_cli" new change "<name>" --agent claude
    ```
 
-   If a change with that name already exists, suggest continuing the existing change instead of creating a new one.
+   If creation nevertheless reports an identity collision, stop and report it; do not overwrite or blindly retry.
 
 4b. **Record this change's TDD choice**
 
@@ -119,6 +125,8 @@ If no argument is provided, the workflow will extract requirements from conversa
    - If the append fails, report the exact write error and stop the workflow. Do not continue to proposal authoring with an unrecorded choice.
 
 5. **Write the proposal**
+
+   On resume, if proposal.md exists, read and reuse it, skip its `new artifact` command, and proceed to the impact advisory and step 6. Existing content that needs correction is edited during validation/review, not recreated with `new artifact`.
 
    **IMPORTANT — file path rules for the `## Impact` section:**
    - All file paths SHALL be written relative to the project root (e.g., `src/lib/foo.ts`, `src-tauri/crates/core/src/bar.rs`, `openspec/specs/auth/spec.md`).
@@ -165,6 +173,7 @@ If no argument is provided, the workflow will extract requirements from conversa
    Loop through artifacts in dependency order (skip proposal since it's already done):
 
    a. **For each artifact that is `ready` (dependencies satisfied)**:
+   - On resume, do not recreate an existing file even if the artifact is incomplete. Read it and retain its content; create only missing output files (for specs, compare the required capability paths individually). Correct invalid existing content through edits during validation, without discarding completed tasks. Stop and route to ingest if the correction changes the requested contract or scope.
    - **Check if the artifact is optional**: If the artifact is NOT in the dependency chain of any `applyRequires` artifact (i.e., removing it would not block reaching apply), it is optional. Get its instructions and read the `instruction` field. If the instruction contains conditional criteria (e.g., "create only if any apply"), evaluate whether any criteria apply to this change based on the proposal content. If none apply, skip the artifact and show: "⊘ Skipped <artifact-id> (not needed for this change)". Then continue to the next artifact.
    - Get instructions:
      ```bash
@@ -255,8 +264,15 @@ If no argument is provided, the workflow will extract requirements from conversa
 
    **Entry conditions**
    - For `cash-propose`, start this loop only after proposal, design, specs, and tasks artifacts required for apply are complete AND `"$cash_cli" validate "<name>"` has passed. If validation fixes are required, complete them before entering this loop.
-   - For `cash-apply`, start this loop only after all implementation tasks are complete and `tasks.md 全 [x]`.
+   - For `cash-apply`, start this loop only after all implementation tasks are complete and `tasks.md 全 [x]`, and Pre-gate notes recovery has checked or reconstructed implementation-notes.md.
    - Do not run this loop per artifact or per task; the granularity is per-change.
+
+   **Managed bundle publication**
+   - This protocol applies to cash-apply task edits and to either workflow's review/self-check edits. After changing managed runtime, either canonical skill variant, or bundle version, complete publication before the next Cash command (including validate, instructions, touched, and task done), not merely before the next reviewer. Ordinary application/artifact edits do not trigger publication.
+   - Identify the installation mode and the initially verified bundle before editing. Do not treat unexplained pre-existing runtime/skill drift as part of this task or silently bless it. If the installer or launcher rejects an invalid/unsafe state, preserve its diagnostic and stop; do not hand-edit manifest digests, use `--init-receipt`, or automatically force an unrelated overwrite.
+   - In the canonical source repository, edit the `.claude` source or variant rules, run `fish scripts/cash-skills/generate.fish` when generation inputs changed, and keep `cash-skills.version` and the installer's `BUNDLE_VERSION` aligned and newer than the committed bundle when skills changed. Run relevant non-Cash generation/content checks, then `./install-cash-skills.fish --self` to publish the portable manifest. This maintains the manifest, not a receipt. A failed generation or publication stops the workflow before any further Cash command. Do not publish while parallel workers are still writing managed files.
+   - In a vendored or receipt-based target, do not run source-only `--self` or reissue a receipt for edited content. Use the trusted source installer with the target's existing publication mode (`--vendor <target>` or `--target <target>`) only when that source contains the requested changes and the update is authorized. Preserve local edits; do not reinstall over them to clear an error. If the trusted source or a safe publication path is unavailable, stop and report the missing prerequisite. Unknown installation modes also stop.
+   - After successful publication, resume required verification and task/output recording. If a later fix changes managed bytes again, publish again before the next Cash command. Retain the instruction version with which an already-active review loop began.
 
    **Pre-round mechanical self-check (main agent, inline)**
 
@@ -282,9 +298,10 @@ If no argument is provided, the workflow will extract requirements from conversa
      - `new`: the finding matches no prior blocking finding. A finding that matches only a prior non-blocking triage note remains `new`; record only a one-line cross-reference to the original triage note, not a duplicate triage note or signal.
    - Disposition matching uses the same artifact or file and the same defect mechanism; line ranges are advisory. If deduplicated findings disagree, a blocking disposition (`unresolved-prior` or `fix-introduced`) wins over `new`.
    - Before accepting a `new` tag, the main agent MUST inspect whether the finding is at a fix-touched location from this loop or, for a seeded re-run, the prior run. If the defect stems from those fix actions, correct it to `fix-introduced` and record the original tag, corrected tag, and evidence in `## Fix Actions`. Record every disposition correction; list blocking-to-non-blocking corrections in the completion output.
-   - A surviving `Critical` or `Warning` finding is blocking if and only if its verified disposition is `unresolved-prior` or `fix-introduced`. In a run's first round, every surviving `Critical` and `Warning` is blocking; a seeded re-run's first round instead uses the seeded cumulative blocking set.
-   - A finding whose latest state is a non-blocking triage note MUST NOT become blocking again merely because it is re-reported. The only exception is new evidence tying it to recorded fix actions, which returns it as `fix-introduced` with a traced correction.
-   - Every surviving `new` finding is non-blocking. Record it as a triage note in `## Fix Actions`, include it in the signals write step, and list it prominently in the completion output. For a non-blocking `Critical`, also recommend a follow-up change proposal.
+   - A surviving `Critical` or `Warning` finding is blocking if and only if its verified disposition is `unresolved-prior` or `fix-introduced`, or it meets the Safety exception below. In a run's first round, every surviving `Critical` and `Warning` is blocking; a seeded re-run's first round uses the seeded cumulative blocking set plus any newly verified Safety exception.
+   - **Safety exception**: a post-filter `Critical` or `Warning`, including `new`, MUST enter the cumulative blocking set when concrete evidence proves data loss or a security vulnerability introduced or permitted by the current change's in-scope artifacts or implementation. Require the affected path and scope declaration, a reachable trigger/input, and a reproduction or explicit code/contract causal chain proving the destructive outcome or security-boundary violation. A security-related label, hypothetical risk, pre-existing unrelated defect, or missing test alone is insufficient. Record the evidence and the reason for applying the exception in `## Fix Actions`; keep the true disposition (`new` is not relabeled `fix-introduced`). Confidence filtering, accepted-risk consent, grader protection, design circuit breaker, the round cap, and verified-resolution requirements still apply. An exception withheld from fixing remains blocking and uses the existing abort/accepted-risk exits.
+   - A finding whose latest state is a non-blocking triage note MUST NOT become blocking again merely because it is re-reported. Exceptions require new evidence tying it to recorded fix actions (return as `fix-introduced` with a traced correction), or new concrete evidence meeting the Safety exception (record the promotion and original triage reference). A promoted finding enters bucket 1 on abort, not bucket 2.
+   - Every surviving `new` finding that does not meet the Safety exception is non-blocking. Record it as a triage note in `## Fix Actions`, include it in the signals write step, and list it prominently in the completion output. For a non-blocking `Critical`, also recommend a follow-up change proposal.
    - Maintain a cumulative blocking set across the run. Every blocking finding enters the set in the round it is found. A member remains in the set even when a reviewer does not re-report it and leaves only through:
      1. verified resolution — a fix is recorded and a later reviewer confirms the fixed location is resolved without re-reporting the finding; or
      2. accepted risk — the member matches a user-consented accepted-risks entry.
@@ -345,6 +362,7 @@ If no argument is provided, the workflow will extract requirements from conversa
    - Direct artifact-requirement violations MUST score `100`, except the accepted-risks and cash-apply introduced-by downgrades below take precedence.
 
    **Confidence filter (applied by main agent before the decision)**
+   - Evaluate concrete Safety exception evidence before applying intentional-behavior false-positive exclusions. Merely documenting the destructive or insecure behavior in design.md, implementation-notes.md, or Non-Goals is not user-consented risk acceptance and MUST NOT alone suppress a proven in-scope safety defect. The accepted-risks ledger and introduced-by evidence rules still take precedence; speculative and unrelated pre-existing issues remain excluded.
    - Re-check every `text` finding; if its fix can affect behavior or design, reclassify it to `design`. The main agent MUST NOT reclassify a `design` finding to `text`.
    - For an accepted-risks match, set confidence ≤ 25 and record the downgrade trace.
    - In cash-apply, a Reviewer B `Critical` or `Warning` finding without verifiable `introduced_by` evidence MUST be reduced to confidence ≤ 25. Record the finding and unverifiable reason in `## Fix Actions`, and list every such downgrade in the completion output.
@@ -360,8 +378,8 @@ If no argument is provided, the workflow will extract requirements from conversa
    - Issues a linter, typechecker, formatter, or compiler would catch (missing imports, type errors, formatting, broken syntax). CI will fail separately; the review loop is not the right channel.
    - Pedantic style nitpicks that a senior engineer would not call out in review.
    - "Missing test coverage" complaints unless `tasks.md` or `design.md` explicitly required the test, or a spec `##### Example:` block is not exercised.
-   - Issues already documented as intentional in `design.md`, `implementation-notes.md`, the proposal's Non-Goals section, or `## Alternatives Considered`.
-   - Intentional behavior changes that align with the proposal's `## Proposed Solution`.
+   - Issues already documented as intentional in `design.md`, `implementation-notes.md`, the proposal's Non-Goals section, or `## Alternatives Considered`, unless concrete Safety exception evidence applies.
+   - Intentional behavior changes that align with the proposal's `## Proposed Solution`, unless concrete Safety exception evidence applies.
    - Suggestions to add abstractions, configurability, or defensive error handling that the spec/contract did not require — these conflict with Focused Implementation Discipline.
    - Suggestions to refactor unrelated code touched only incidentally — these conflict with Focused Implementation Discipline.
 
@@ -369,8 +387,9 @@ If no argument is provided, the workflow will extract requirements from conversa
    - If a reviewer returns no response or malformed output, retry once with a fresh sub-agent invocation for the reviewer role.
    - If both full-round parallel reviewers fail in the same round, treat it as a single role failure (the reviewer role); retry once.
    - If the same role fails two consecutive times in a single round, abort the entire cash workflow.
-   - On abort from sub-agent failure, write the current round file with `decision: aborted` and include the failure note in `## Decision`.
+   - On abort from sub-agent failure, write the current round file with `decision: aborted` and include the failure note in `## Decision`. Preserve the last known cumulative blocking set, fix references, and any valid reviewer output in that file; a failed or missing verdict never resolves a member. Record known blocking counts, not zero merely because a reviewer failed.
    - Do not mark a malformed or failed round as passed, and do not continue to the next round after two consecutive failures.
+   - **Failure-abort recovery**: on an authorized re-run after reviewer failure, reconstruct unresolved members from the prior run's round files, including inherited seeds, recorded fixes, verified removals, and consented risks; do not rely on an absent bucket-1 section. Start a full recovery round with those known members and require both reviewers' explicit resolved/unresolved verdicts per member. Unlike an ordinary seeded re-run, every surviving Critical/Warning in this recovery first round is also blocking, so an incomplete prior scan cannot suppress new findings. If historical evidence is incomplete, disclose the gap and retain all known unresolved members while fully reviewing current artifacts/implementation; never interpret missing history as an empty verified set. If current review inputs cannot be safely read, stop. Continue filenames without overwriting history and use this run's positions for round types and the cap. Reviewer availability is the retry prerequisite; already-recorded fixes may await verification rather than another code change.
 
    **Decision record requirements**
    - Record the post-filter cumulative blocking set's Critical count and Warning count. In an unseeded run's first round, use all surviving Critical and Warning findings because all are blocking.
@@ -384,7 +403,8 @@ If no argument is provided, the workflow will extract requirements from conversa
    - Create the reviews directory if needed: `openspec/changes/<change>/reviews/`.
    - For `cash-propose`, write `openspec/changes/<change>/reviews/propose-r<N>.md`.
    - For `cash-apply`, write `openspec/changes/<change>/reviews/apply-r<N>.md`.
-   - On a first run, use `<N>` as the 1-based round number. On a re-run after abort, continue numbering after the highest existing round file for that skill; never overwrite a completed round file.
+   - On a first run, use `<N>` as the 1-based round number. On every later run, whether the previous decision was `passed` or `aborted`, continue numbering after the highest existing round file for that skill; never overwrite a completed round file.
+   - After `passed`, an explicitly requested re-run starts a new unseeded run with a full first round and a fresh cumulative blocking set. Re-read the current artifacts/implementation and accepted-risks ledger; prior passed-run findings and fixes are historical context, not inherited blockers or current-run fix actions. Every surviving Critical/Warning in this new first round is blocking under the ordinary unseeded first-round rule. Do not restart merely because the workflow completed; re-run only when requested. After `aborted`, retain the existing bucket-1 seeded re-run rules. Round types and the six-round cap use positions within the new run, not global filenames; append ledger rows without resetting history.
    - The generic path pattern is `openspec/changes/<change>/reviews/<skill>-r<N>.md`.
 
    **Round file schema**
@@ -401,7 +421,7 @@ If no argument is provided, the workflow will extract requirements from conversa
    - Record modified files and the reason for each fix in `## Fix Actions`.
    - Re-run relevant CLI checks or tests before the next round when fixes affect generated artifacts or implementation code.
    - For `cash-propose`, if any fix action modifies proposal, design, tasks, or spec artifacts, run `"$cash_cli" validate "<name>"` again and fix validation errors before starting the next round.
-   - 在每輪 fix actions 完成後，record the files that round's Fix Actions modified outside the change directory。若修改了 `.cash-skills/` 下的 runtime 檔，先在 project root 執行 `./install-cash-skills.fish --self`；rebuild the receipt before the next cash command。將候選路徑轉為 project-root-relative，濾除所有 `openspec/changes/` 下的路徑；若濾除後為空，不呼叫 Cash CLI 且不產生警告。否則先執行 `"$cash_cli" touched ensure "<change-name>"`，再以所有候選路徑執行 `"$cash_cli" touched record "<change-name>" --path <path>`；整批失敗時逐路徑重試，以記錄最大合法子集。`touched ensure` 或 `touched record` 失敗時印出警告並繼續，不使 workflow 失敗，也不改變任何 round file 的 `decision`；警告須列出未能記錄的路徑與 `error.code`，並 carry this warning into the final completion output。
+   - 在每輪 fix actions 完成後，record the files that round's Fix Actions modified outside the change directory。Managed bundle publication MUST 已在任何 Cash 驗證或 tracking command 之前完成，涵蓋 runtime 與 skills，且 MUST NOT 將 publication failure 當成下述 best-effort tracking warning。將候選路徑轉為 project-root-relative，濾除所有 `openspec/changes/` 下的路徑；若濾除後為空，不呼叫 Cash CLI 且不產生警告。否則先執行 `"$cash_cli" touched ensure "<change-name>"`，再以所有候選路徑執行 `"$cash_cli" touched record "<change-name>" --path <path>`；整批失敗時逐路徑重試，以記錄最大合法子集。`touched ensure` 或 `touched record` 失敗時印出警告並繼續，不使 workflow 失敗，也不改變任何 round file 的 `decision`；警告須列出未能記錄的路徑與 `error.code`，並 carry this warning into the final completion output。
    - If no fixes are needed because the round passed, write `None; pass condition met.`
    - **Fix-loop design circuit breaker**: cash-apply only. If resolving a surviving finding requires a synchronization primitive, identity/generation type, or state machine not defined in `design.md`, do not implement it. Record a `needs-design` note naming the finding, required mechanism, and reason; set `decision: aborted`; run Abort triage; and direct the user to `/cash-ingest`. In cash-propose, defining the mechanism in its own `design.md` is a normal fix and does not trigger this rule.
    - **Review round action obligation**: before a `next_round`, every surviving finding and every cumulative-set member counted in the decision MUST have an action in the current `## Fix Actions`.
@@ -419,7 +439,7 @@ If no argument is provided, the workflow will extract requirements from conversa
    - A re-run MUST continue numbering after the highest existing round file, include every prior round file or the extract fallback, seed the cumulative blocking set from the prior run's bucket-1 findings, and apply the cumulative-set pass condition in its first full round. Its first-round reviewers return an explicit resolved/unresolved verdict per member.
    - The 6-round cap and round type use positions within the new run, independent of global round-file numbers.
    - If a seeded re-run starts while all members are withheld under grader protection and no consented exit exists, short-circuit before reviewers: write one continued-number round file with no reviewer findings, `round_type: full`, `decision: aborted`, and triage; append one ledger row. The pre-spawn short-circuit round uses `round_type: full` and spawns no reviewer. The completion output MUST direct the user to obtain consent for the protected members or expand the structured scope declarations via `/cash-ingest` before any further re-run.
-   - Consecutive sub-agent failure aborts and proposal-level scope-error aborts are exempt from this triage.
+   - Consecutive sub-agent failure aborts use Failure-abort recovery instead of bucket triage; this is also the exception to the ordinary seeded first-round admission rule. Proposal-level scope-error aborts remain exempt from this triage and require corrected scope before a full re-proposal review; do not treat missing buckets as evidence that the proposal passed.
 
    <!-- GRADER-IMMUTABILITY -->
    **Grader immutability**
