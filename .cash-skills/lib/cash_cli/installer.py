@@ -21,7 +21,7 @@ from typing import Iterable
 from .config import ConfigError, parse_cash_config, parse_openspec_config
 
 
-BUNDLE_VERSION = "2.21.0"
+BUNDLE_VERSION = "2.31.0"
 VERSION_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 MODE_RE = re.compile(r"0[0-7]{3}\Z")
@@ -53,6 +53,7 @@ BUNDLE_RUNTIME_PATHS = (
     ".cash-skills/lib/cash_cli/commands/discovery.py",
     ".cash-skills/lib/cash_cli/commands/drift.py",
     ".cash-skills/lib/cash_cli/commands/lifecycle.py",
+    ".cash-skills/lib/cash_cli/commands/lint_round.py",
     ".cash-skills/lib/cash_cli/commands/search.py",
     ".cash-skills/lib/cash_cli/commands/tasks.py",
     ".cash-skills/lib/cash_cli/commands/validate.py",
@@ -64,6 +65,11 @@ BUNDLE_RUNTIME_PATHS = (
     ".cash-skills/lib/cash_cli/spec_merge.py",
     ".cash-skills/lib/cash_cli/validation.py",
     ".cash-skills/lib/cash_cli/workspace.py",
+)
+# Known additive runtime transitions. Select a historical expected inventory
+# by version, never by whichever records happen to be present in a receipt.
+RECEIPT_RUNTIME_ADDITIONS = (
+    ("2.22.0", ".cash-skills/lib/cash_cli/commands/lint_round.py"),
 )
 STABLE_PATHS = (".cash-skills/bin/cash", ".cash-workspace.lock")
 GUIDANCE_PATHS = ("AGENTS.md", "CLAUDE.md")
@@ -729,6 +735,56 @@ def parse_receipt(content: bytes, expected_records: tuple[Record, ...]) -> Recei
     if sha256(runtime_stream) != rows[1][1]:
         raise InstallerError("receipt runtime generation does not match its records")
     return Receipt(rows[0][1], rows[1][1], tuple(parsed))
+
+
+def parse_upgrade_receipt(
+    content: bytes,
+    source_records: tuple[Record, ...],
+    source_version: str,
+) -> tuple[Receipt, tuple[Record, ...]]:
+    # Preserve support for receipts with the complete current inventory.
+    try:
+        return parse_receipt(content, source_records), source_records
+    except InstallerError:
+        pass
+    # The strict parser owns shape, order, modes and generation checks.
+    # Only older versions may use a known pre-addition inventory.
+    expected = source_records
+    header = content.split(b"\n", 1)[0].split(b"\t")
+    if len(header) == 2 and header[0] == b"version":
+        try:
+            old_version = header[1].decode("ascii")
+        except UnicodeDecodeError:
+            old_version = ""
+        if VERSION_RE.fullmatch(old_version) and compare_versions(old_version, source_version) < 0:
+            absent = {
+                path for introduced, path in RECEIPT_RUNTIME_ADDITIONS
+                if compare_versions(old_version, introduced) < 0
+            }
+            expected = tuple(record for record in source_records if record.path not in absent)
+    return parse_receipt(content, expected), expected
+
+
+def validate_receipt_upgrade(
+    target: Path,
+    receipt: Receipt,
+    installed_records: tuple[Record, ...],
+    source_records: tuple[Record, ...],
+) -> list[str]:
+    conflicts = validate_installed_receipt(target, receipt, installed_records)
+    installed_paths = {record.path for record in installed_records}
+    for record in source_records:
+        if record.path in installed_paths:
+            continue
+        # A newly managed path is not authorized by the old receipt. Preserve
+        # local content unless it already equals the incoming source record.
+        current = optional_snapshot(target, record.path)
+        if current.exists and (
+            current.mode != record.mode
+            or sha256(current.content or b"") != record.digest
+        ):
+            conflicts.append(record.path)
+    return conflicts
 
 
 def parse_legacy_receipt(
@@ -2005,7 +2061,9 @@ def install_target(
     skill_records = tuple(record for record in records if record.kind == "skill")
     if receipt_snapshot.exists:
         try:
-            receipt = parse_receipt(receipt_snapshot.content or b"", records)
+            receipt, installed_records = parse_upgrade_receipt(
+                receipt_snapshot.content or b"", records, version
+            )
         except InstallerError as new_error:
             legacy_receipt = parse_legacy_receipt(
                 receipt_snapshot.content or b"",
@@ -2068,7 +2126,7 @@ def install_target(
 
     conflicts: list[str] = []
     if receipt is not None:
-        conflicts = validate_installed_receipt(target, receipt, records)
+        conflicts = validate_receipt_upgrade(target, receipt, installed_records, records)
         if compare_versions(version, receipt.version) == 0:
             for parsed, source_record in zip(receipt.records, records, strict=True):
                 if parsed[2] != source_record.digest:
@@ -2373,7 +2431,9 @@ def install_vendored_target(
         ensure_regular_shape(target, RECEIPT_PATH)
         receipt_snapshot = optional_snapshot(target, RECEIPT_PATH)
         if manifest is None:
-            receipt = parse_receipt(receipt_snapshot.content or b"", records)
+            receipt, installed_records = parse_upgrade_receipt(
+                receipt_snapshot.content or b"", records, version
+            )
     else:
         receipt_snapshot = Snapshot(False)
 
@@ -2441,7 +2501,7 @@ def install_vendored_target(
         ):
             raise InstallerError("equal-version portable source integrity drift")
     elif receipt is not None:
-        conflicts.extend(validate_installed_receipt(target, receipt, records))
+        conflicts.extend(validate_receipt_upgrade(target, receipt, installed_records, records))
         if compare_versions(version, receipt.version) == 0:
             if receipt.generation != generation or any(
                 parsed[2] != source_record.digest
