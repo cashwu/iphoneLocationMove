@@ -1,6 +1,7 @@
 ---
 name: cash-commit
-description: "Commit files related to a specific Cash change"
+description: "Commit files related to a specific Cash change. Use when a completed implementation is ready for a change-scoped commit."
+argument-hint: "[change-name]"
 license: MIT
 metadata:
   author: cash
@@ -100,15 +101,19 @@ This is a **utility skill** (not a workflow step). It reads source file tracking
 
     Apply the same shared review-loop signal rule from step 2 to every `openspec/signals/` path in the resolved source allowlist, including the same active-or-parked existence check and explicit whole-file include/exclude decision. Step 2a has no task-entry granularity, but that MUST NOT bypass the shared-file decision.
 
-3. **Collect artifact files**
+3. **Build bounded commit-plan evidence**
 
-   From the project root, run `git status --porcelain=v1 -z --untracked-files=all`. Parse NUL-delimited records, not lines or whitespace: each record starts with the two-character status and one space, followed by the raw path. Rename/copy records contain a second NUL field: the first path is the destination, the second is the source and has no status prefix. Do not strip characters from the second field or interpret paths as C-quoted strings. Preserve spaces, Unicode, and embedded newlines in paths.
+   From the project root, obtain **two consecutive observations** with `GIT_OPTIONAL_LOCKS=0`, fixed `core.quotePath=false`, `status.renames=true`, `status.renameLimit=0`, and `git status --porcelain=v2 -z --untracked-files=all --ignore-submodules=none`. Preserve the complete NUL bytes. Each observation also records HEAD, the Git-resolved index device/inode/size/mtime_ns/SHA-256, candidate identities, and limitations. The observations must be identical before displaying a plan; this is **bounded stability evidence**, not an atomic snapshot.
 
-   Build an individual-file dirty set covering staged, unstaged, and untracked changes. Treat a rename as destination addition plus source deletion, so both paths are shown and evaluated against the allowlist independently. A copy's unchanged source is context only, not a dirty path. Never stage a directory entry or silently include a rename endpoint outside the confirmed set. Command failure, unmerged entries, or malformed/incomplete records stop the workflow before staging.
+   Resolve Git metadata only with `git rev-parse --git-path`. Before confirmation, fail closed for malformed or non-UTF-8 paths, unmerged entries, `assume-unchanged`, `skip-worktree`, any dirty or clean gitlink, or existing `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, rebase, or sequencer metadata. Parse v2 rename records with both NUL endpoints and treat them as one logical candidate; include both or neither. A copy's unchanged source is context only and its destination is an added candidate.
 
-   Filter the parsed dirty set to files under `openspec/changes/<name>/`. These are the change's artifact files (proposal, design, tasks, specs, etc.). All later status reads in this workflow MUST use the same command and parsing rules.
+   The supported candidate set is closed: deletion, a regular file with effective Git mode `100644`, or a symlink with expected Git mode `120000`. Fail closed before opening a FIFO, socket, device, other filesystem type, executable regular file, existing `100755` entry, chmod-only change, or gitlink.
 
-   When step 2a applies, use the artifact set it rebuilt instead of this filter.
+   For a regular file, use no-follow open/read with matching before/after fstat, then run `git check-attr -z filter -- <path>`; any configured external `filter` value other than unspecified/unset stops the workflow. Send the same captured bytes twice to `git hash-object --path=<path> --stdin` to bind the expected blob after Git's built-in CRLF/ident normalization. For a symlink, use `lstat`/`readlink`, require stable identity, and hash link-target bytes with `git hash-object --stdin` without a path filter. Any identity change, hash failure, or unequal OID stops the workflow. Produce text patches only from captured bytes; for binary content show and require confirmation of blob OID, byte size, mode, and limitation instead of decoding it.
+
+   Build the dirty set from this observation and filter artifact paths as before; when step 2a applies, use its rebuilt artifact set. A selected path with staged and unstaged content commits its **完整worktree版本** and aligns that path's index to new HEAD; disclose that the **原partial-staged selection不保留**. Unrelated staged entries remain allowed, must not enter this commit, and must preserve identity.
+
+   Derive `plan_id` from a canonical schema version, HEAD/index/status identities, confirmed path set, expected blobs/modes, limitations, and the exact commit message; exclude display-only patches. Immediately before mutation, perform **mutation前重新取得兩次observation** with the same rules and require both and the recomputed `plan_id` to equal the confirmed plan. A mismatch revokes confirmation and stops before mutation.
 
 4. **Identify unrelated dirty files**
 
@@ -173,7 +178,7 @@ This is a **utility skill** (not a workflow step). It reads source file tracking
 
 6a. **Archive sub-flow** (only when the user selected "Archive first, then commit together")
 
-    This sub-flow executes three steps in sequence before returning to the main commit flow.
+    This sub-flow preserves the pre-archive provenance and executes one complete preview followed by at most one checked archive before returning to the main commit flow.
 
     **6a-i. Incomplete task handling**
 
@@ -183,7 +188,7 @@ This is a **utility skill** (not a workflow step). It reads source file tracking
     - If **incomplete tasks exist**:
       - Display the list of incomplete tasks
       - Use the **AskUserQuestion tool** to ask: "These tasks are still incomplete. Mark all as complete before archiving?"
-        - **Yes**: set a flag to pass `--mark-tasks-complete` to `"$cash_cli" archive`
+        - **Yes**: set a flag to pass `--mark-tasks-complete` to the preview and checked archive commands
         - **No**: cancel the archive sub-flow; do not invoke archive with incomplete tasks
 
     **6a-ii. Delta spec sync determination**
@@ -194,28 +199,44 @@ This is a **utility skill** (not a workflow step). It reads source file tracking
     - **Default — no flag**: otherwise do not add `--skip-specs`, whether or not delta specs exist, and do NOT ask the user to choose.
     - MUST NOT infer a skip request from the change looking tooling-only or doc-only, from an earlier archive, or from any other indirect signal.
 
-    Record the resolved outcome by evaluating in order: `skipped` (the flag is set), then `synced` (delta specs exist and the flag is not set), then `no delta specs` (no delta specs and the flag is not set). 6a-iii uses that recorded outcome, and only `synced` admits `openspec/specs/` paths into the commit set.
+    Record the resolved outcome by evaluating in order: `skipped` (the flag is set), then `synced` (delta specs exist and the flag is not set), then `no delta specs` (no delta specs and the flag is not set). The checked result uses that recorded outcome, and only `synced` admits `openspec/specs/` paths into the commit set.
 
-    **6a-iii. Archive execution and file collection**
+    **6a-iii. Preview and authorization**
 
-    Execute the archive:
-
-    ```bash
-    "$cash_cli" archive <name> [--mark-tasks-complete] [--skip-specs]
-    ```
-
-    Before running archive, keep a copy of the already confirmed commit set:
+    Keep a copy of the already confirmed commit set before previewing:
     - Change artifacts collected before archive
     - Tracked source files from `.cash-skills/state/touched/<change-name>.json`
     - The confirmed `### Review Loop Outputs` set and every shared-signal decision
     - User customizations already confirmed before archive
 
+    Run exactly one read-only preview, using the resolved flags:
+
+    ```bash
+    "$cash_cli" archive <name> --preview --json [--mark-tasks-complete] [--skip-specs] [--no-validate]
+    ```
+
+    Display the complete versioned plan as one authorization unit: `schema_version`, `change`, `preview_id`, `archived_id`, `archived_path`, `flags`, `incomplete_artifacts`, `incomplete_tasks`, `validation_findings`, `spec_updates`, `warnings`, and `cleanup_plan`. Display any already-known Critical quality findings with their locations from the review evidence in the same authorization unit; if none are known, state that explicitly. Delta specs SHALL be applied by core execution; the skill MUST NOT apply or synchronize specs independently.
+
+    A preview error or blocking conflict stops the sub-flow without staging, caller-side cleanup, or a second preview. Ask for one explicit authorization for this exact plan and its `preview_id`; cancellation or decline performs no archive execution.
+
+    **6a-iv. Checked archive execution and file collection**
+
+    Immediately before mutation, execute exactly one checked archive with the same flags and the accepted identity:
+
+    ```bash
+    "$cash_cli" archive <name> --check-preview <preview_id> --json [same --mark-tasks-complete] [same --skip-specs] [same --no-validate]
+    ```
+
+    Authorization is revoked by any content, flags, destination, date, warning, scope, message, or `preview_id` change. If the CLI returns `archive_preview_stale`, or any other execution error, stop; MUST NOT retry, perform standalone sync, manual move, amend, reset, rollback, or claim filesystem-derived success. This invocation has exactly one preview and exactly one checked execution; a later attempt is a new workflow invocation with a new preview and confirmation.
+
+    On success, use only the returned `archived_id` and returned `archived_path` verbatim. Do not construct an archive destination from a date, change name, repository root, or convention. Preserve every non-empty `cleanup_warnings` entry in the archive-aware commit confirmation; warnings do not convert a proven archive success into failure. The cached source provenance remains authoritative until the post-archive collection completes.
+
     After archive completes successfully:
 
-    1. Re-run `git status --porcelain=v1 -z --untracked-files=all` using step 3's parsing rules only to identify allowlisted archive outputs. Do not treat the full post-archive dirty state as archive output.
+    1. Re-run `git status --porcelain=v1 -z --untracked-files=all` using step 3's parsing rules only to identify allowlisted archive outputs. Preserve and compare the before/after NUL status delta; do not treat the full post-archive dirty state as archive output.
     2. Replace the pre-archive artifact set with the following actual post-archive dirty paths; do not merely append them to the old set. Retain the confirmed source/review-loop sets and other customizations, intersected with the current dirty set. An old untracked artifact moved into archive is absent, not a Git deletion, and MUST NOT remain as a staging target. Resolve the exact destination returned by this archive rather than selecting unrelated archive directories. Preserve explicit artifact exclusions across the move by mapping their old relative suffix to that destination; show excluded paths under Unrelated Changes. Rebuild from only:
        - Deletions under `openspec/changes/<name>/`
-       - Additions or modifications under `openspec/changes/archive/<date>-<change>/`
+       - Additions or modifications under the returned `archived_path`
        - Changes under `openspec/specs/` only when 6a-ii recorded the outcome `synced`, and only paths in the successful archive's `archive-manifest.json` `master_digests` whose current SHA-256 equals the recorded digest. Reuse step 2a's spec sync set rules. Other dirty master specs remain Unrelated Changes; directory membership alone is not attribution. If the manifest cannot be read or validated, stop before staging.
     3. Keep all other post-archive dirty files in Unrelated Changes unless they were part of the pre-archive confirmed commit set
     4. Display an **updated commit plan** showing all sections:
@@ -224,6 +245,7 @@ This is a **utility skill** (not a workflow step). It reads source file tracking
     ## Updated Commit Plan: <change-name> (with archive)
 
     **Spec sync:** <synced | skipped (explicitly requested) | no delta specs>
+    **Archive:** success at returned `archived_path`; `cleanup_warnings` remain visible
 
     ### Change Artifacts (archived)
     - D  openspec/changes/<name>/proposal.md
@@ -231,8 +253,8 @@ This is a **utility skill** (not a workflow step). It reads source file tracking
     - ...
 
     ### Archived Files
-    - A  openspec/changes/archive/<date>-<change>/proposal.md
-    - A  openspec/changes/archive/<date>-<change>/tasks.md
+    - A  <archived_path>/proposal.md
+    - A  <archived_path>/tasks.md
     - ...
 
     ### Source Files
@@ -279,29 +301,23 @@ This is a **utility skill** (not a workflow step). It reads source file tracking
 
    Show the generated message to the user and allow editing before proceeding.
 
-8. **Selective staging**
+8. **Prepare an owned transaction**
 
-   Before staging, run `git diff --cached --name-only -z --no-renames` from the project root and compare every staged path with the confirmed commit set. If any staged path is outside that set, stop and report those paths; do not unstage, reset, or commit them. Preserve the user's index and ask them to resolve the unrelated staged entries before retrying. A failed command or malformed output also stops the workflow.
+   Only a new selected path absent from both HEAD and index may need `git add --intent-to-add`. Record its absent preimage, inspect the actual delta while holding the Git-resolved index lock, and journal only the expected intent-to-add postimage. On cancellation or failed commit, remove it through a private `GIT_INDEX_FILE` copy and publish only when its journaled identity and every unrelated index entry still match. Otherwise leave state unchanged and report cleanup pending. Never use reset, stash, `git add .`, or `git add -A`.
 
-   Stage each confirmed file individually:
+   Create a `0700` owned temporary directory with exclusive `0600` NUL paths, registration, and message files plus a `0700` empty hooks directory. Normalize the message to non-empty UTF-8 bytes with exactly one trailing LF. Record the parent and every object's device/inode/type/mode plus payload digest or empty-directory identity. Immediately before Git, follow a **no-follow parent/object chain** and re-open/fstat/read every object: files must remain the same owned regular `0600` inode with bytes/digest equal to the confirmed plan, and the hooks directory must remain the same owned empty `0700` inode. Any mismatch stops before commit. Cleanup only objects whose identity still proves ownership.
 
-   ```bash
-   git --literal-pathspecs add -- <file1>
-   git --literal-pathspecs add -- <file2>
-   ...
-   ```
+9. **Path-limited commit and verification**
 
-   **NEVER use `git add .` or `git add -A`.** Each file must be staged explicitly.
-
-   Pass each raw path as a separately quoted argument, including rename source deletions when confirmed. Do not split filenames on whitespace, expand glob characters, or pass the display form `old -> new` as a path.
-
-9. **Commit**
-
-   Immediately before committing, repeat the staged-path check above and require the staged path set to equal the confirmed dirty commit set. On any mismatch, stop without committing. Use a commit-message file and `--file` so multiline text and shell metacharacters are preserved literally.
+   Invoke exactly:
 
    ```bash
-   git commit --file <message-file>
+   git -c core.hooksPath=<verified-owned-empty-dir> --literal-pathspecs commit --only --no-verify --cleanup=verbatim --pathspec-from-file=<paths-file> --pathspec-file-nul -F <message-file>
    ```
+
+   The empty `core.hooksPath` disables every hook, including `prepare-commit-msg`; `--no-verify` additionally guards pre-commit and commit-msg. `--cleanup=verbatim` prevents ambient `commit.cleanup` from rewriting the confirmed message. Pass every repository-relative path as one literal NUL record, including both rename endpoints; never pass a display form such as `old -> new`.
+
+   Save Git exit status/stdout/stderr and resulting HEAD. **Git exit 0單獨不得視為成功**. If a commit exists, verify its parent equals planned HEAD, its tree differs only at confirmed paths, every **candidate blob/mode** equals expected identity, message bytes equal the confirmed bytes, selected-path index entries align to new HEAD, and all **無關index entries** retain identity. If any check fails, report the actual commit hash and pending differences; **不得retry、amend、reset或rollback history**. If this invocation's HEAD movement cannot be proven, report unknown/pending and do not attempt another commit.
 
 10. **Show result**
 
@@ -334,7 +350,12 @@ No dirty files found for this change (no modified artifacts, no tracked source f
 
 **Guardrails**
 
-- **NEVER use `git add .` or `git add -A`** — every file must be staged individually with `git add <file>`
+- **NEVER use `git add .` or `git add -A`**; only the narrowly owned intent-to-add transition is allowed before the path-limited commit
 - **NEVER commit files the user hasn't confirmed** — always show the file list and get explicit confirmation first
+- External writers may still win the final revalidation-to-Git-read race; post-commit verification reports pending and never claims atomicity
 - If the tracking file is missing, warn but don't block — artifact-only commits are valid
 - If **AskUserQuestion tool** is not available, ask the same questions as plain text and wait for the user's response
+
+### No-spec commit presentation
+
+`no-spec` commit plan 可列出 `No delta specs`，不應要求或虛構 delta；仍須列出 proposal、`design.md`、`tasks.md`、source、review outputs 與使用者確認的完整 path set。不得自動傳入 `--skip-specs`、`--no-verify` 以外的 bypass 或移除任何 no-spec artifact；commit confirmation、`preview_id`（若先 archive）、hooks isolation、literal pathspec、完整內容／blob／mode identity、index 與 message 驗證保持原契約。no-spec 只是 presentation 分支，不能繞過 archive preview／checked execution、commit hooks isolation 或 post-commit transaction verification。

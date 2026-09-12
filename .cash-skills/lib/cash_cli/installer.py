@@ -21,7 +21,7 @@ from typing import Iterable
 from .config import ConfigError, parse_cash_config, parse_openspec_config
 
 
-BUNDLE_VERSION = "2.31.0"
+BUNDLE_VERSION = "2.41.0"
 VERSION_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 MODE_RE = re.compile(r"0[0-7]{3}\Z")
@@ -37,8 +37,10 @@ SKILLS = (
     "drift",
     "ingest",
     "propose",
+    "review",
     "verify",
 )
+LEGACY_SPECTRA_SKILLS = tuple(skill for skill in SKILLS if skill != "review")
 # The expected runtime inventory for a target, where no source tree exists to
 # derive it from. Ordered by path bytes, matching `source_inventory`'s sort key.
 # `test_installer_runtime.py` asserts this equals what `source_inventory`
@@ -54,6 +56,7 @@ BUNDLE_RUNTIME_PATHS = (
     ".cash-skills/lib/cash_cli/commands/drift.py",
     ".cash-skills/lib/cash_cli/commands/lifecycle.py",
     ".cash-skills/lib/cash_cli/commands/lint_round.py",
+    ".cash-skills/lib/cash_cli/commands/scope.py",
     ".cash-skills/lib/cash_cli/commands/search.py",
     ".cash-skills/lib/cash_cli/commands/tasks.py",
     ".cash-skills/lib/cash_cli/commands/validate.py",
@@ -64,12 +67,17 @@ BUNDLE_RUNTIME_PATHS = (
     ".cash-skills/lib/cash_cli/resources.py",
     ".cash-skills/lib/cash_cli/spec_merge.py",
     ".cash-skills/lib/cash_cli/validation.py",
+    ".cash-skills/lib/cash_cli/workflow.py",
     ".cash-skills/lib/cash_cli/workspace.py",
 )
-# Known additive runtime transitions. Select a historical expected inventory
-# by version, never by whichever records happen to be present in a receipt.
-RECEIPT_RUNTIME_ADDITIONS = (
-    ("2.22.0", ".cash-skills/lib/cash_cli/commands/lint_round.py"),
+# Known additive inventory transitions. Select a historical expected inventory
+# by version, never by whichever records happen to be present in target state.
+INVENTORY_ADDITIONS = (
+    ("2.22.0", "runtime", ".cash-skills/lib/cash_cli/commands/lint_round.py"),
+    ("2.33.0", "skill", ".agents/skills/cash-review/SKILL.md"),
+    ("2.33.0", "skill", ".claude/skills/cash-review/SKILL.md"),
+    ("2.40.0", "runtime", ".cash-skills/lib/cash_cli/commands/scope.py"),
+    ("2.40.0", "runtime", ".cash-skills/lib/cash_cli/workflow.py"),
 )
 STABLE_PATHS = (".cash-skills/bin/cash", ".cash-workspace.lock")
 GUIDANCE_PATHS = ("AGENTS.md", "CLAUDE.md")
@@ -105,6 +113,11 @@ APPROVED_LAUNCHER_TRANSITIONS = (
         "592345fffa009998d48008857ad903d89b0e5f0986d141a5fec26368b527c8a4",
         "e7457338cfd6721fcc21fbbf96fad287176ebec674be6a12fc4e9ff27542804e",
         "2.13.0",
+    ),
+    (
+        "e7457338cfd6721fcc21fbbf96fad287176ebec674be6a12fc4e9ff27542804e",
+        "201ba141f148f05a071efee25457ebf85fa2296498097a4d8e0232d358e7b3df",
+        "2.33.0",
     ),
 )
 
@@ -423,7 +436,7 @@ def legacy_manifest(source: Path) -> tuple[tuple[str, str], ...]:
     expected_paths = tuple(
         f"{variant}/skills/spectra-{skill}"
         for variant in (".agents", ".claude")
-        for skill in SKILLS
+        for skill in LEGACY_SPECTRA_SKILLS
     )
     if len(rows) != len(expected_paths) + 1:
         raise InstallerError("legacy digest manifest has an invalid record count")
@@ -635,24 +648,39 @@ def parse_portable_manifest(
                 0o755 if row[3] == "100755" else 0o644,
             )
         )
+    manifest_version = rows[1][1]
     runtime_paths = [
         record.path for record in parsed if record.kind == "runtime"
     ]
-    skill_paths = [
+    historical_absent = {
+        path
+        for introduced, _, path in INVENTORY_ADDITIONS
+        if compare_versions(manifest_version, introduced) < 0
+    }
+    parsed_skill_paths = [
+        record.path for record in parsed if record.kind == "skill"
+    ]
+    current_skill_paths = [
         f"{variant}/skills/cash-{skill}/SKILL.md"
         for variant in (".agents", ".claude")
         for skill in SKILLS
+    ]
+    historical_skill_paths = [
+        path
+        for path in current_skill_paths
+        if path not in historical_absent
     ]
     expected_order = [
         ("stable", STABLE_PATHS[0]),
         ("stable", STABLE_PATHS[1]),
         *(("runtime", path) for path in runtime_paths),
-        *(("skill", path) for path in skill_paths),
+        *(("skill", path) for path in parsed_skill_paths),
     ]
     if (
         not runtime_paths
         or runtime_paths
         != sorted(runtime_paths, key=lambda value: value.encode("utf-8"))
+        or parsed_skill_paths not in (current_skill_paths, historical_skill_paths)
         or any(
             not path.startswith(".cash-skills/lib/cash_cli/")
             or not path.endswith(".py")
@@ -758,7 +786,7 @@ def parse_upgrade_receipt(
             old_version = ""
         if VERSION_RE.fullmatch(old_version) and compare_versions(old_version, source_version) < 0:
             absent = {
-                path for introduced, path in RECEIPT_RUNTIME_ADDITIONS
+                path for introduced, _, path in INVENTORY_ADDITIONS
                 if compare_versions(old_version, introduced) < 0
             }
             expected = tuple(record for record in source_records if record.path not in absent)
@@ -2059,6 +2087,11 @@ def install_target(
     receipt: Receipt | None = None
     legacy_receipt: LegacyReceipt | None = None
     skill_records = tuple(record for record in records if record.kind == "skill")
+    legacy_skill_records = tuple(
+        record
+        for record in skill_records
+        if Path(record.path).parent.name.removeprefix("cash-") in LEGACY_SPECTRA_SKILLS
+    )
     if receipt_snapshot.exists:
         try:
             receipt, installed_records = parse_upgrade_receipt(
@@ -2067,7 +2100,7 @@ def install_target(
         except InstallerError as new_error:
             legacy_receipt = parse_legacy_receipt(
                 receipt_snapshot.content or b"",
-                skill_records,
+                legacy_skill_records,
             )
             if legacy_receipt is None:
                 raise new_error
@@ -2138,7 +2171,7 @@ def install_target(
     elif legacy_receipt is not None:
         for (path, expected_digest), record in zip(
             legacy_receipt.records,
-            skill_records,
+            legacy_skill_records,
             strict=True,
         ):
             snapshot = optional_snapshot(target, path)
@@ -2159,7 +2192,7 @@ def install_target(
             for record in skill_records
             if optional_snapshot(target, record.path).exists
         ]
-        if len(present_skills) not in {0, 24} and not force:
+        if len(present_skills) not in {0, 26} and not force:
             if wait_for_inflight_receipt(target, receipt_snapshot):
                 return install_target(
                     source,

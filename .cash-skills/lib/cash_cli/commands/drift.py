@@ -9,7 +9,7 @@ from collections.abc import Sequence
 
 from ..errors import CashError
 from ..workspace import Workspace
-from .discovery import _change_directory, _created, _tasks
+from .discovery import _change_directory, _created, _tasks, dormancy_payload
 
 
 _CODE_SPAN = re.compile(r"`([^`\r\n]+)`")
@@ -48,16 +48,45 @@ def _has_head(workspace: Workspace) -> bool:
             ["git", "-C", str(workspace.root), "rev-parse", "--verify", "HEAD"],
             check=False,
             capture_output=True,
+            text=True,
         )
-    except OSError as error:
+    except (OSError, subprocess.CalledProcessError) as error:
         raise CashError("git_error", "Git invocation failed.", 1) from error
-    return result.returncode == 0
+    if result.returncode == 0:
+        return True
+    stderr = result.stderr or ""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    if any(
+        marker in stderr
+        for marker in (
+            "Needed a single revision",
+            "ambiguous argument 'HEAD'",
+            "unknown revision",
+            "bad revision 'HEAD'",
+        )
+    ):
+        return False
+    raise CashError("git_error", "Git invocation failed.", 1)
 
 
-def drift_payload(workspace: Workspace, name: str) -> dict[str, object]:
+def drift_payload(
+    workspace: Workspace,
+    name: str,
+    *,
+    observation_timestamp: object | None = None,
+) -> dict[str, object]:
     change = _change_directory(workspace, name)
     created = _created(workspace, change)
-    if _has_head(workspace):
+    has_head = _has_head(workspace)
+    dormancy = dormancy_payload(
+        workspace,
+        change,
+        created=created,
+        has_head=has_head,
+        observation_timestamp=observation_timestamp,
+    )
+    if has_head:
         last_commit_output = _git(
             workspace,
             "log",
@@ -121,7 +150,9 @@ def drift_payload(workspace: Workspace, name: str) -> dict[str, object]:
         set(impact_paths) & dirty_paths,
         key=lambda value: value.encode("utf-8"),
     )
-    days_old = max(0, (dt.date.today() - created).days)
+    # Use the same UTC observation used by dormancy so injected observations
+    # keep the complete drift decision deterministic.
+    days_old = int(dormancy["age_days"])
     staleness_score = min(40, days_old * 2)
     anchor_score = min(40, len(broken) * 10)
     dirty_score = min(20, len(matching_dirty) * 5)
@@ -152,13 +183,19 @@ def drift_payload(workspace: Workspace, name: str) -> dict[str, object]:
     )
     if total < 30:
         severity = "light"
-        recommendation = f"cash-apply {name}"
+        action_kind = "apply"
     elif total < 60:
         severity = "medium"
-        recommendation = f"cash-ingest {name}"
+        action_kind = "ingest"
     else:
         severity = "heavy"
-        recommendation = f"cash-ingest {name}"
+        action_kind = "ingest"
+    recommended_action = {
+        "action_kind": action_kind,
+        "change_name": name,
+        "flags": [],
+    }
+    recommendation = f"cash-{action_kind} {recommended_action['change_name']}"
     return {
         "change_id": name,
         "created": created.isoformat(),
@@ -171,6 +208,8 @@ def drift_payload(workspace: Workspace, name: str) -> dict[str, object]:
         "total_score": total,
         "severity": severity,
         "primary_recommendation": recommendation,
+        "dormancy": dormancy,
+        "recommended_action": recommended_action,
     }
 
 
@@ -203,6 +242,18 @@ def render_report(payload: dict[str, object]) -> str:
     )
     if not payload["tasks_blocked_external"]:
         lines.append("- none")
+    dormancy = payload["dormancy"]
+    lines.append(
+        "Dormancy: "
+        f"{dormancy['status']} ({dormancy['reason']}; "
+        f"age_days={dormancy['age_days']}, idle_days={dormancy['idle_days']})"
+    )
+    action = payload["recommended_action"]
+    lines.append(
+        "Recommended action: "
+        f"{action['action_kind']} {action['change_name']} "
+        f"(flags={action['flags']})"
+    )
     lines.append(f"Primary recommendation: {payload['primary_recommendation']}")
     return "\n".join(lines) + "\n"
 

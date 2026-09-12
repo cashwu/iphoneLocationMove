@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 LOCALE = "Traditional Chinese (繁體中文)"
@@ -96,6 +96,12 @@ ARTIFACT_GRAPH = (
 )
 
 ARTIFACTS_BY_ID = {artifact.id: artifact for artifact in ARTIFACT_GRAPH}
+
+NO_SPEC_ARTIFACT_GRAPH = tuple(
+    replace(artifact, dependencies=tuple(key for key in artifact.dependencies if key != "specs"))
+    for artifact in ARTIFACT_GRAPH
+    if artifact.id != "specs"
+)
 
 APPLY_INSTRUCTION = (
     "讀取 context files，依文件順序完成 pending tasks，"

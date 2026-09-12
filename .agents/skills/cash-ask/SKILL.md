@@ -1,6 +1,7 @@
 ---
 name: cash-ask
-description: "Query openspec/documents and answer questions"
+description: "Query openspec/documents and answer questions. Use when you need an evidence-backed answer about project requirements or changes."
+argument-hint: "[query]"
 license: MIT
 metadata:
   author: cash

@@ -7,15 +7,26 @@ import sys
 from collections.abc import Sequence
 
 from ..errors import CashError
-from ..resources import ARTIFACTS_BY_ID
 from ..workspace import Workspace
+from ..workflow import artifact_for_change, read_change_metadata
 from .discovery import _artifact_done
 
 
 _SLUG = re.compile(r"[a-z][a-z0-9-]*\Z")
 
 
-def create_change(workspace: Workspace, name: str, *, agent: str) -> None:
+def create_change(
+    workspace: Workspace,
+    name: str,
+    *,
+    agent: str,
+    schema: str = "spec-driven",
+    task_order: str = "document",
+) -> None:
+    if schema not in {"spec-driven", "no-spec"}:
+        raise CashError("invalid_arguments", f"Unknown schema: {schema}")
+    if task_order not in {"document", "dependency"}:
+        raise CashError("invalid_arguments", f"Unknown task order: {task_order}")
     active = workspace.change_path(name)
     parked = workspace.change_path(name, parked=True)
     archive_collision = any(
@@ -31,9 +42,10 @@ def create_change(workspace: Workspace, name: str, *, agent: str) -> None:
     workspace.ensure_directory("openspec/changes")
     os.mkdir(active, 0o755)
     metadata = (
-        "schema: spec-driven\n"
+        f"schema: {schema}\n"
         f"created: {dt.date.today().isoformat()}\n"
         f"created_by: {agent}\n"
+        + (f"task_order: {task_order}\n" if task_order != "document" else "")
     ).encode("utf-8")
     try:
         transaction = workspace.transaction()
@@ -59,12 +71,18 @@ def create_artifact(
 ) -> None:
     if artifact_id == "spec":
         artifact_id = "specs"
+    metadata = read_change_metadata(workspace, name)
+    if artifact_id == "specs" and metadata.schema == "no-spec":
+        raise CashError(
+            "artifact_not_in_schema",
+            "The no-spec schema does not contain a specs artifact.",
+            2,
+            f"openspec/changes/{name}/.openspec.yaml",
+        )
     change = workspace.change_path(name)
     if not workspace.is_dir(workspace.relative(change)):
         raise CashError("change_not_found", f"Active change not found: {name}")
-    artifact = ARTIFACTS_BY_ID.get(artifact_id)
-    if artifact is None:
-        raise CashError("unknown_artifact", f"Unknown artifact: {artifact_id}")
+    artifact = artifact_for_change(workspace, name, artifact_id)
     missing = [
         dependency
         for dependency in artifact.dependencies
@@ -115,7 +133,35 @@ def execute(arguments: Sequence[str]) -> int:
         raise CashError("invalid_arguments", "new requires change or artifact arguments.")
     mode = arguments[0]
     if mode == "change":
-        create_change(workspace, arguments[1], agent=_option(arguments, "--agent"))
+        name = arguments[1]
+        agent = _option(arguments, "--agent")
+        schema = "spec-driven"
+        task_order = "document"
+        index = 2
+        seen: set[str] = set()
+        while index < len(arguments):
+            value = arguments[index]
+            if value in {"--agent", "--schema", "--task-order"}:
+                if value in seen or index + 1 >= len(arguments):
+                    raise CashError("invalid_arguments", f"Duplicate or missing option: {value}")
+                candidate = arguments[index + 1]
+                if candidate.startswith("--"):
+                    raise CashError("invalid_arguments", f"{value} requires a value.")
+                seen.add(value)
+                if value == "--schema":
+                    schema = candidate
+                elif value == "--task-order":
+                    task_order = candidate
+                index += 2
+                continue
+            raise CashError("invalid_arguments", f"Unknown option: {value}")
+        create_change(
+            workspace,
+            name,
+            agent=agent,
+            schema=schema,
+            task_order=task_order,
+        )
         return 0
     if mode != "artifact":
         raise CashError("unknown_command", f"Unknown new mode: {mode}")

@@ -1,9 +1,10 @@
 ---
 name: cash-ask
-description: "Query openspec/documents and answer questions"
+description: "Query openspec/documents and answer questions. Use when you need an evidence-backed answer about project requirements or changes."
+argument-hint: "[query]"
 context: fork
 agent: Explore
-disallowedTools: [Edit, Write]
+disallowed-tools: [Edit, Write]
 license: MIT
 metadata:
   author: cash
@@ -25,6 +26,8 @@ test -x "$cash_cli" || exit 1
 ## Claude fork context
 
 This generated Claude Code skill runs with `context: fork`. The rules in this section take precedence over the shared `ask` body below.
+
+This fork is report-only: it MUST only execute the report core and return one consolidated report, then stop. It MUST NOT ask or wait for the user, MUST NOT modify or reformat files, MUST NOT stage or commit, and MUST NOT invoke follow-up workflow. If a decision or unique change identity is missing, return concrete context and missing input to the main thread; the main thread decides what happens next.
 
 If the user did not provide an explicit question and the fork-visible context does not contain a concrete query, return a short message asking the main thread to rerun `/cash-ask <question>`. Do NOT run `"$cash_cli" search`, do NOT fabricate a query from unavailable main conversation context, and do NOT wait for an interactive answer inside the fork.
 

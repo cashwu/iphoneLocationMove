@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ..errors import CashError
 from ..workspace import Workspace
+from ..workflow import parse_task_entries, read_change_metadata, task_schedule
 
 
 _TASK = re.compile(r"^- \[([ xX])\] (\[P\] )?(.+)$")
@@ -293,7 +294,11 @@ def _realign_touched_attribution(
         )
         if tasks_relative is None:
             return touched, False
-        entries = _task_entries(workspace.read_text(tasks_relative))
+        metadata = read_change_metadata(workspace, name)
+        entries = _task_entries(
+            workspace.read_text(tasks_relative),
+            task_order=metadata.task_order,
+        )
     except (CashError, OSError):
         return touched, False
 
@@ -362,26 +367,15 @@ def ensure_touched(workspace: Workspace, name: str) -> dict[str, object]:
     return value
 
 
-def _task_entries(content: str) -> list[tuple[int, str, str, bool]]:
-    entries: list[tuple[int, str, str, bool]] = []
-    labels: set[str] = set()
-    for line_index, line in enumerate(content.splitlines()):
-        match = _TASK.fullmatch(line)
-        if match is None:
-            continue
-        label_match = _TASK_LABEL.match(match.group(3))
-        if label_match is None or label_match.group(1) in labels:
-            raise CashError("task_id_invalid", "Task labels must be present and unique.")
-        labels.add(label_match.group(1))
-        entries.append(
-            (
-                line_index,
-                str(len(entries) + 1),
-                match.group(3),
-                match.group(1).lower() == "x",
-            )
-        )
-    return entries
+def _task_entries(
+    content: str,
+    *,
+    task_order: str = "document",
+) -> list[tuple[int, str, str, bool]]:
+    return [
+        (entry.line_index, entry.ordinal, entry.description, entry.done)
+        for entry in parse_task_entries(content, task_order=task_order)
+    ]
 
 
 def mark_task_done(
@@ -393,11 +387,27 @@ def mark_task_done(
     change = workspace.change_path(name)
     tasks_relative = f"openspec/changes/{name}/tasks.md"
     content = workspace.read_text(tasks_relative)
-    entries = _task_entries(content)
+    metadata = read_change_metadata(workspace, name)
+    entries = _task_entries(content, task_order=metadata.task_order)
+    schedule = task_schedule(content, task_order=metadata.task_order)
     matches = [entry for entry in entries if entry[1] == task_id]
     if len(matches) != 1:
         raise CashError("task_not_found", f"Unknown or duplicate task id: {task_id}")
     line_index, _, description, already_done = matches[0]
+    if (
+        not already_done
+        and schedule["mode"] == "dependency"
+        and task_id in schedule["blocked_ids"]
+    ):
+        raise CashError(
+            "task_dependency_pending",
+            f"Task {task_id} is blocked by incomplete dependencies.",
+        )
+    if not already_done and schedule["mode"] == "dependency" and paths is None:
+        raise CashError(
+            "invalid_arguments",
+            "Dependency tasks require --path or --no-files.",
+        )
     if paths is None and _TASK.fullmatch(content.splitlines()[line_index]).group(2):
         raise CashError("invalid_arguments", "Parallel tasks require --path or --no-files.")
     snapshot_relative = _state_relative("snapshots", name)

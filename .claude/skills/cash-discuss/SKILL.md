@@ -1,7 +1,8 @@
 ---
 name: cash-discuss
-description: "Have a focused discussion about a topic and reach a conclusion"
-disallowedTools: [Edit, Write]
+description: "Have a focused discussion about a topic and reach a conclusion. Use when requirements or design choices need a focused decision before implementation."
+argument-hint: "[topic|change-name]"
+disallowed-tools: [Edit, Write]
 license: MIT
 metadata:
   author: cash
@@ -277,6 +278,14 @@ When the discussion converges on building something:
 ---
 
 ## Guardrails
+
+## Intent preservation and evidence traceability
+
+Before asking an interview or correction follow-up, handle an explicit comprehension signal: when the user says the explanation is hard to understand, first restate the same content more simply in plain Traditional Chinese; only then decide whether a question is needed. Never replace that restatement with a new question. When the user rejects the problem definition, discard the rejected agent restatement and rebuild the requirement from the user's original words before continuing.
+
+Before presenting a recommendation, separate confirmed user intent, codebase evidence and assumptions. If the user corrects a premise, first restate the corrected requirement in plain Traditional Chinese and preserve the restated requirement, identify which conclusion changes, and preserve the user's trade-off in the conclusion and proposed capture location. Do not silently translate a correction into a different scope or design.
+
+For each alternative, retain the evidence that supports it, the concrete consequence if its premise is wrong, and the verification needed before implementation. A conclusion that changes an existing change's contract or task dependencies goes through `/cash-ingest <change-name>` so all affected artifacts stay synchronized; discuss mode does not implement code. End with one consolidated conclusion containing the decision, rationale, unresolved risk or explicit deferral, and next action.
 
 - **Don't implement** — Never write code or implement features. Creating Cash artifacts is fine, writing application code is not.
 - **Don't leave without a conclusion** — If the user tries to end without a conclusion, summarize where things stand and state what's unresolved.

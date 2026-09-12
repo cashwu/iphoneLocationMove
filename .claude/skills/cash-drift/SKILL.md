@@ -1,9 +1,10 @@
 ---
 name: cash-drift
-description: "Detect drift between a Cash change and the current codebase state"
+description: "Detect drift between a Cash change and the current codebase state. Use when an existing change may be stale or out of sync with the repository."
+argument-hint: "[change-name]"
 context: fork
 agent: Explore
-disallowedTools: [Edit, Write]
+disallowed-tools: [Edit, Write]
 license: MIT
 metadata:
   author: cash
@@ -25,6 +26,8 @@ test -x "$cash_cli" || exit 1
 ## Claude fork context
 
 This generated Claude Code skill runs with `context: fork`. The rules in this section take precedence over the shared `drift` body below.
+
+This fork is report-only: it MUST only execute the report core and return one consolidated report, then stop. It MUST NOT ask or wait for the user, MUST NOT modify or reformat files, MUST NOT stage or commit, and MUST NOT invoke follow-up workflow. If a decision or unique change identity is missing, return concrete context and missing input to the main thread; the main thread decides what happens next.
 
 When no change name is provided, run `"$cash_cli" list --json`. Auto-select only when there is exactly one active change. If there are zero active changes or more than one active change, return the candidate list or empty-state message and ask the main thread to rerun `/cash-drift <change-name>`. Do NOT ask an interactive selection question inside the fork.
 
@@ -57,7 +60,9 @@ Detect drift between a Cash change and the current codebase state. Reports time 
    - `broken_anchors`: design.md references (file paths / symbols / functions / CLI flags) that no longer resolve
    - `tasks_blocked_external`: pending tasks whose referenced files were modified by commits outside the change dir
    - `tasks_maybe_resolved`: pending tasks whose verb+target keywords match commit subjects since `created`
-   - `primary_recommendation`: the recommended Cash skill name and change name
+   - `dormancy`: the CLI-owned `{status, reason, age_days, idle_days}` evidence
+   - `recommended_action`: the CLI-owned `{action_kind, change_name, flags}` routing object
+   - `primary_recommendation`: a legacy rendering of the structured action; display only, never a routing source
 
 3. **Present the report**
 
@@ -95,36 +100,25 @@ Detect drift between a Cash change and the current codebase state. Reports time 
 
    Keep technical details below the plain-language conclusion. List broken anchors, blocked tasks, and maybe-resolved tasks only when non-empty. Omit empty technical detail sections entirely. Keep the report short enough to skim; the goal is to help the user decide, not to explain the scoring model.
 
-4. **Apply the recommendation interactively**
+4. **Validate and route the structured action**
 
-   Use the **AskUserQuestion tool** to offer one decision based on `severity`. Use plain-language option labels while preserving the exact command in each option description. Do NOT auto-invoke `/cash-apply`, `/cash-ingest`, or `"$cash_cli" archive`; always wait for the user's choice.
-   Use the returned `severity` as the routing authority; do not recompute severity from score or anchor percentages. The current CLI thresholds are light below 30, medium from 30 to below 60, and heavy at 60 or above.
-   - **Light** (drift is minor):
-     - Recommended label: "Directly start work"
-       - Description: run `/cash-apply <name>`
-     - Alternate label: "Pause for now"
-       - Description: do nothing until the user reviews manually
-   - **Medium** (refresh worth doing):
-     - Recommended label: "Refresh the plan"
-       - Description: run `/cash-ingest <name>` with the broken references and task collisions as context
-     - Alternate label: "Directly start work"
-       - Description: run `/cash-apply <name>` only if the user knows the reported changes are harmless
-     - Alternate label: "Pause for now"
-       - Description: do nothing until the user reviews manually
-   - **Heavy** (design diverges from code):
-     - Recommended label: "Refresh the plan"
-       - Description: run `/cash-ingest <name>` with the drift findings as context, matching the CLI's `primary_recommendation`. This updates the existing change; it does not archive or restart it.
-     - Alternate label: "Pause for now"
-       - Description: do nothing until the user reviews manually
+   Read `recommended_action` as the only follow-up routing source. Before using it, verify that the object has exactly these keys: `action_kind`, `change_name`, and `flags`; `action_kind` is exactly `apply` or `ingest`; `change_name` is non-empty and equals the JSON `change_id`; and `flags` is exactly an empty array. A non-empty array, unknown key, unknown action, empty name, or mismatched name is malformed.
 
-**Passive Trigger**
+   For malformed structured action, report `Malformed structured action` and fail closed. Stop immediately and do not parse or execute `primary_recommendation`. The legacy field may be displayed as evidence only; it is never a routing authority.
 
-When `/cash-apply` is invoked on a change whose `.openspec.yaml created` date is more than 5 days ago AND no commits have touched the change directory in the past 3 days, the apply skill SHOULD run drift analysis first and surface findings before tasks begin. The trigger is guidance only and MUST NOT block apply from proceeding.
+   After shape validation, render the action with this variant's invocation prefix and present explicit choices. In a main-thread flow, use the **AskUserQuestion tool**, preserve the exact command in each option description, and wait for explicit user authorization before executing it. MUST NOT execute `apply` or `ingest` before authorization. If the AskUserQuestion tool is unavailable, ask the same options in plain text and wait.
 
-(Threshold reasoning: AI-assisted commits are daily-cadence, not weekly. A change sitting ≥5 days with ≥3 days of no commits is almost always genuine stagnation rather than normal pacing.)
+   - `action_kind: apply`: label the option "Directly start work" and describe `/cash-apply <name>`.
+   - `action_kind: ingest`: label the option "Refresh the plan" and describe `/cash-ingest <name>` with the drift findings as context.
+   - An alternate "Pause for now" option does nothing until the user decides.
+
+   In the report-only fork, return the validated recommendation and evidence to the main thread. The fork MUST NOT execute the action or ask or wait for the user.
+
+**Dormancy evidence**
+
+Use the CLI-provided `dormancy` object as evidence only. `cash-drift` MUST NOT read change dates, query Git history, recompute thresholds, or create a second dormancy decision.
 
 **Guardrails**
 
 - Read-only: NEVER modify files, artifacts, or git state based on drift findings
 - If `"$cash_cli" drift` returns a non-zero exit code or an invalid response, report the execution error and stop
-- If **AskUserQuestion tool** is not available, ask the same questions as plain text and wait for the user's response

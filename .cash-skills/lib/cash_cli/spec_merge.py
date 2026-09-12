@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .errors import CashError
 from .workspace import Workspace
+from .workflow import read_change_metadata
 
 
 _SECTION = re.compile(r"## (ADDED|MODIFIED|REMOVED|RENAMED) Requirements")
@@ -313,6 +314,21 @@ def _merge(
 
 def build_sync_plan(workspace: Workspace, name: str) -> SyncPlan:
     change = workspace.change_path(name)
+    metadata = read_change_metadata(workspace, name)
+    if metadata.schema == "no-spec":
+        from .validation import no_spec_conflicts
+
+        conflicts = no_spec_conflicts(workspace, name)
+        if conflicts:
+            conflict = conflicts[0]
+            raise CashError(conflict["code"], conflict["message"], 2, conflict["path"])
+        return SyncPlan(
+            writes={},
+            delta_digests={},
+            master_before={},
+            master_after={},
+            already_synced=True,
+        )
     delta_paths = [
         workspace.root / relative
         for relative in workspace.spec_files(workspace.relative(change / "specs"))

@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from .errors import CashError
 from .workspace import Workspace
+from .workflow import parse_task_entries, read_change_metadata
 
 
 _OPERATIONS = {
@@ -21,6 +23,37 @@ _RENAME_TO = re.compile(r"- TO: `### Requirement: (.+)`")
 
 def finding(code: str, path: str, message: str) -> dict[str, str]:
     return {"code": code, "path": path, "message": message}
+
+
+def no_spec_conflicts(workspace: Workspace, name: str) -> list[dict[str, str]]:
+    """Check schema conflicts even when other lifecycle artifacts are missing."""
+    base = f"openspec/changes/{name}"
+    proposal_path = f"{base}/proposal.md"
+    conflicts: list[dict[str, str]] = []
+    if workspace.is_file(proposal_path):
+        proposal = workspace.read_text(proposal_path)
+        impacts = re.findall(r"^## Impact\s*\n([\s\S]*?)(?=^## |\Z)", proposal, re.MULTILINE)
+        if len(impacts) != 1 or re.findall(r"^- Affected specs: (.*)$", impacts[0], re.MULTILINE) != ["none"]:
+            conflicts.append(finding("schema_artifact_conflict", proposal_path, "no-spec Impact must contain exactly '- Affected specs: none'."))
+        for heading in ("### New Capabilities", "### Modified Capabilities"):
+            sections = re.findall(rf"^{re.escape(heading)}\s*\n([\s\S]*?)(?=^### |^## |\Z)", proposal, re.MULTILINE)
+            if len(sections) > 1 or any([line.strip() for line in section.splitlines() if line.strip()] not in ([], ["(none)"]) for section in sections):
+                conflicts.append(finding("schema_artifact_conflict", proposal_path, f"no-spec proposal cannot declare capabilities in {heading}."))
+
+    def has_markdown(directory: str) -> bool:
+        for entry, kind in workspace.list_directory(directory):
+            relative = f"{directory}/{entry}"
+            if kind == "directory":
+                if has_markdown(relative):
+                    return True
+            elif entry.endswith(".md"):
+                return True
+        return False
+
+    specs = f"{base}/specs"
+    if workspace.is_dir(specs) and has_markdown(specs):
+        conflicts.append(finding("schema_artifact_conflict", specs, "no-spec changes cannot contain delta markdown."))
+    return conflicts
 
 
 def _master_titles(workspace: Workspace, capability: str) -> set[str] | None:
@@ -181,7 +214,12 @@ def validate_delta_spec(
     return findings
 
 
-def validate_tasks(workspace: Workspace, path: Path) -> list[dict[str, str]]:
+def validate_tasks(
+    workspace: Workspace,
+    path: Path,
+    *,
+    task_order: str = "document",
+) -> list[dict[str, str]]:
     relative = workspace.relative(path)
     labels: set[str] = set()
     findings: list[dict[str, str]] = []
@@ -200,6 +238,10 @@ def validate_tasks(workspace: Workspace, path: Path) -> list[dict[str, str]]:
         labels.add(label)
     if count == 0:
         findings.append(finding("tasks_empty", relative, "tasks.md has no tasks."))
+    try:
+        parse_task_entries(workspace.read_text(relative), task_order=task_order)
+    except CashError as error:
+        findings.append(finding(error.code, relative, error.message))
     return findings
 
 
@@ -209,8 +251,13 @@ def validate_change(workspace: Workspace, name: str) -> list[dict[str, str]]:
     if not workspace.is_dir(change_relative):
         return [finding("change_not_found", f"openspec/changes/{name}", "Active change does not exist.")]
     findings: list[dict[str, str]] = []
+    try:
+        metadata = read_change_metadata(workspace, name)
+    except CashError as error:
+        findings.append(finding(error.code, error.path or change_relative, error.message))
+        return findings
     required = {
-        ".openspec.yaml": ("schema: spec-driven",),
+        ".openspec.yaml": (f"schema: {metadata.schema}",),
         "proposal.md": ("## Summary", "## Capabilities", "## Impact"),
         "design.md": ("## Implementation Contract",),
         "tasks.md": ("## ",),
@@ -229,8 +276,11 @@ def validate_change(workspace: Workspace, name: str) -> list[dict[str, str]]:
                 )
     tasks = change / "tasks.md"
     if workspace.is_file(workspace.relative(tasks)):
-        findings.extend(validate_tasks(workspace, tasks))
+        findings.extend(validate_tasks(workspace, tasks, task_order=metadata.task_order))
     specs_relative = f"{change_relative}/specs"
+    if metadata.schema == "no-spec":
+        findings.extend(no_spec_conflicts(workspace, name))
+        return findings
     sync_manifest_relative = f".cash-skills/state/sync/{name}.json"
     identities_already_applied = False
     if workspace.is_file(sync_manifest_relative):

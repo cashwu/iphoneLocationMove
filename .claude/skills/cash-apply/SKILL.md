@@ -1,6 +1,7 @@
 ---
 name: cash-apply
-description: Implement Cash tasks with a sub-agent quality gate after completion
+description: "Implement Cash tasks with a sub-agent quality gate after completion. Use when a named change is ready for implementation or task work is continuing."
+argument-hint: "[change-name]"
 license: MIT
 metadata:
   author: cash
@@ -27,6 +28,10 @@ Implement tasks from a Cash change.
 
 **Prerequisites**: The project-local launcher initialized above is required. If root resolution, launcher validation, or a Cash command fails, report the exact error and STOP.
 
+## Reader-facing output contract
+
+四個 workflow 的 user-visible status、question、heading 與 summary MUST 先說明結果與下一步，再提供 diagnostics、locations 與其他證據。Cash 內部術語首次出現時，必須用一句繁體中文說明它對使用者的意義。固定 user-visible literals 使用繁體中文：`使用計畫檔`、`使用對話內容`、`完成`、`開始實作`、`使用 change：`、`仍要繼續`、`停止`、`修正後繼續`、`繼續執行…`、`實作完成`、`本次完成`、`實作已暫停`、`遇到的問題`、`Artifacts 一致`、`發現 N 個問題，正在修正（第 M/2 次）`、`使用 TDD`、`不使用 TDD`。commands、paths、identifiers、schema fields 與 quoted source text MUST 保持 verbatim；不得以 emoji、顏色或僅有格式差異承載唯一狀態。
+
 **Steps**
 
 1. **Select the change**
@@ -36,7 +41,7 @@ Implement tasks from a Cash change.
    - Auto-select if only one active change exists
    - If ambiguous, run `"$cash_cli" list --json` AND `"$cash_cli" list --parked --json` to get all available changes (including parked ones). Parked changes should be annotated with "(parked)" in the selection list. Use the **AskUserQuestion tool** to let the user select
 
-   Always announce: "Using change: <name>" and how to override (e.g., `/cash-apply <other>`).
+   Always announce: "使用 change：<name>" and how to override (e.g., `/cash-apply <other>`).
 
    If the AskUserQuestion tool is unavailable, ask the same question or options in plain text and wait for the user's response.
 
@@ -59,8 +64,8 @@ Implement tasks from a Cash change.
      Inform the user that this change is currently parked（暫存）.
      Use the **AskUserQuestion tool** to ask whether to continue.
      Two options:
-     - **Continue**: Unpark the change and proceed with apply
-     - **Cancel**: Stop the workflow
+     - **仍要繼續**：Unpark the change and proceed with apply
+     - **停止**：結束 workflow
 
      If the user chooses to continue:
 
@@ -100,6 +105,7 @@ Implement tasks from a Cash change.
    - Context file paths (varies by schema)
    - Progress (total, complete, remaining)
    - Task list with status
+   - CLI-owned `dormancy` evidence with `status`, `reason`, `age_days`, and `idle_days`
    - Dynamic instruction based on current state
 
    **Handle states:**
@@ -119,7 +125,7 @@ The apply instructions JSON always includes `preflight`. Treat a missing `prefli
   ⚠ Preflight warnings:
   - Drifted files (modified after change was created): <list paths>
   - Change is <N> days old
-  Continuing...
+  繼續執行…
   ```
   Only show the lines that are relevant (skip drifted if none, skip staleness if not stale).
 - **`"critical"`**: display missing files with their source artifact, then use the **AskUserQuestion tool** to ask the user:
@@ -131,8 +137,8 @@ The apply instructions JSON always includes `preflight`. Treat a missing `prefli
   These files are referenced in the change artifacts but no longer exist on disk.
   ```
 
-  Options: "Continue anyway" / "Stop"
-  If the user chooses "Stop", end the workflow.
+  Options: `仍要繼續` / `停止`
+  If the user chooses `停止`, end the workflow.
 
 3c. **Artifact quality check**
 
@@ -141,25 +147,21 @@ Run `"$cash_cli" analyze <change-name> --json` to check cross-artifact consisten
 - **Zero findings**: silently continue.
 - **Warning/Suggestion only**: display a one-line summary (e.g., "⚠ Artifact analysis: 2 warnings found") and continue automatically.
 - **Critical findings**: display each Critical finding (summary + location + recommendation), then use the **AskUserQuestion tool**:
-  - **Fix and continue** — fix contract-preserving artifact issues inline, re-run analysis, then proceed. If the fix changes contract/scope or requires a user decision, pause and hand off to `/cash-ingest`; this choice does not authorize guessing a new contract
-  - **Continue anyway** — skip fixes and start implementation
-  - **Stop** — end the workflow
+  - **修正後繼續** — fix contract-preserving artifact issues inline, re-run analysis, then proceed. If the fix changes contract/scope or requires a user decision, pause and hand off to `/cash-ingest`; this choice does not authorize guessing a new contract
+  - **仍要繼續** — skip fixes and start implementation
+  - **停止** — end the workflow
 
-3d. **Drift dormancy check** (passive trigger for stale changes)
+3d. **Consume CLI-owned dormancy evidence**
 
-When the change has been dormant for more than 5 days AND the change directory has had zero commits in the past 3 days, surface a drift report before tasks begin — the change is likely out-of-sync with the current codebase.
+Before any state branch, read and validate `dormancy` from the apply instructions. The object MUST contain exactly these keys: `status`, `reason`, `age_days`, and `idle_days`; no key may be missing or unknown. `status` MUST be one of `triggered`, `fresh`, or `unknown`; `reason` MUST be a non-empty string; `age_days` MUST be a non-negative integer; and `triggered`／`fresh` require a non-negative integer `idle_days` while `unknown` requires `idle_days: null` (status/null coherence). A missing key, unknown key, wrong type, unknown status, or status/null incoherence is `malformed dormancy`: report the contract error and stop before any normal state or generic fallback.
 
-Detect dormancy from `.openspec.yaml` `created` and `git log -1 --format=%at -- openspec/changes/<name>/`:
+`cash-apply` MUST NOT read `created` for dormancy, MUST NOT execute Git history queries, and MUST NOT recompute thresholds. The CLI's object is the only dormancy evidence.
 
-- **Both conditions met**: run `"$cash_cli" drift <change-name>`, display the report, then use the **AskUserQuestion tool**:
-  - **Continue with apply** — proceed to tasks (recommended for Light drift)
-  - **Refresh first** — pause apply, run `/cash-ingest <change-name>` to update artifacts, then resume
-  - **Stop** — end the workflow
-- **Either condition not met**: silently continue, no output.
+- **`triggered`**: run `"$cash_cli" drift <name> --json` and display the complete drift report. If it contains a `recommended_action`, validate its exact structured shape using the drift routing contract; a report-only fork returns the recommendation and evidence to the main thread, while a main-thread flow presents explicit choices and waits for explicit user authorization before executing apply or ingest.
+- **`fresh`**: skip a full drift run and continue the existing authorized task flow.
+- **`unknown`**: report the supplied `reason` and preserve the evidence gap; do not call it fresh or triggered, and continue only the already authorized apply flow.
 
-The trigger is guidance only — it MUST NOT block apply from proceeding when the user chooses to continue. Hard-blocking on dormancy would punish legitimate "I came back after a long weekend" cases.
-
-(Threshold reasoning: AI-assisted commits are daily-cadence. ≥5 days dormant + ≥3 days no commit ≈ genuine stagnation, not normal pacing.)
+For all three statuses, only the validated CLI fields control the branch. No branch may issue a second dormancy calculation or history lookup.
 
 4. **Read context files**
 
@@ -189,7 +191,7 @@ The trigger is guidance only — it MUST NOT block apply from proceeding when th
    - When accepting parameters, check for type confusion and silent failures
    - Fetch audit instructions by running `"$cash_cli" instructions --skill audit`, follow the discipline checklist (not the standalone 3-agent workflow)
 
-   If `parallel_tasks: true` is set, check whether consecutive pending tasks have `[P]` markers (format: `- [ ] [P] Task description`). You SHALL dispatch consecutive `[P]` tasks as parallel agents. Only fall back to sequential when tasks have a data dependency (one task's output is another's input) or when tasks modify overlapping regions of the same file. Targeting the same file alone is NOT a reason to skip parallel dispatch — if the modified regions are disjoint, dispatch in parallel. If the environment does not support parallel execution, ignore `[P]` markers and execute tasks sequentially.
+   Use mutually exclusive execution modes from the CLI `schedule.mode`. In `document` mode only, dispatch the next contiguous `[P]` group when `parallel_tasks: true`; sequential fallback preserves explicit attribution for every `[P]` task. In `dependency` mode, dispatch only `schedule.ready_ids` in document order; never infer eligibility from adjacent `[P]` markers. With parallel tooling and `parallel_tasks: true`, dispatch independent ready tasks only after proving their allowed regions do not overlap. Otherwise execute `ready_ids` sequentially; missing parallel tooling never permits violating dependencies. When disjoint scope cannot be proven, serialize or request a dependency update through `/cash-ingest`.
 
 6. **Show current progress**
 
@@ -236,19 +238,50 @@ The trigger is guidance only — it MUST NOT block apply from proceeding when th
    - Keep changes minimal and focused
    - **Managed bundle publication** — if this task changed Cash-managed runtime or skills, follow the Managed bundle publication protocol in the shared gate below before the next Cash command, including verification commands and `task done`. Publication is required during the task loop, not only during review fixes. For parallel work, wait for all bundle-writing workers to finish and publish their combined authorized changes before recording any task; attribute generated files and manifest/version updates to the task that produced them rather than letting an automatic diff assign sibling work.
    - **Verify before marking done** — re-read the task description from the tasks file AND the relevant Implementation Contract content from design.md. For each requirement stated in the task description and each contract item that covers this task's scope, confirm it is addressed by your changes. Before calling `task done`, require verification evidence appropriate to the task: its named test, CLI, analyzer, or manual assertion must pass. After that primary target passes, run the targets named in the task's `regression` field; when that field is `N/A`, confirm its stated reason still holds. If any contract item, task requirement, or verification target is missing or failing, implement/fix it now. Do not mark the task complete until every part of the description is covered and the contract for this task is satisfied.
-   - Mark task complete by running: `"$cash_cli" task done --change "<name>" <task-id>`
+   - Before dispatch, save the full original task description byte-for-byte. Before tracking, fetch current full apply instructions and compact schedule, then uniquely match that original description to its current CLI ordinal. Require the same pending/ready task and unchanged contract; if the description is absent, duplicated or no longer eligible, stop without tracking. Never reuse a stale ordinal after task-list changes.
+   - Mark task complete with the current matched ordinal. In dependency mode, use `"$cash_cli" task done --change "<name>" <task-id> --path <path> [--path <path> ...]` or explicit `--no-files`, including sequential execution. Only ordinary non-`[P]` tasks in document mode may use `"$cash_cli" task done --change "<name>" <task-id>` for automatic snapshot-diff attribution.
      This command marks the checkbox in tasks.md AND records which files were modified for this task.
    - Continue to next task
 
-   **Parallel task dispatch**: When consecutive `[P]`-marked tasks are found and `parallel_tasks: true` is configured (see Step 5), dispatch them as parallel agents in a single message. Workers MUST NOT edit task checkboxes or run `task done`; each returns its task ID, verification evidence, and exact project-root-relative source paths it changed (include both endpoints of a rename and tracked deletions; exclude `openspec/changes/` and internal state). The main agent verifies each result and serially runs `"$cash_cli" task done --change "<name>" <task-id> --path <path> [--path <path> ...]`. Use `--no-files` for a verified task with no source changes, never an omitted file list. Pass raw paths as separately quoted arguments. Shared files may appear in both task lists when both tasks modified disjoint regions; attribution is file-level, not hunk-level. Do not derive worker ownership from a whole-worktree diff. If any `[P]` task fails or its file list cannot be established, pause and report; do not mark that task done. Explicit attribution is also required for `[P]` tasks executed sequentially as a fallback. Ordinary non-`[P]` sequential tasks may retain the automatic snapshot-diff command above.
+   **Parallel task dispatch**: Use Step 5's mutually exclusive mode selection: document mode selects consecutive `[P]` tasks; dependency mode selects eligible `ready_ids`. When parallel dispatch is enabled and scopes are proven disjoint, dispatch the selected tasks in a single message. Workers MUST NOT edit task checkboxes or run `task done`; each returns its task ID, verification evidence, and exact project-root-relative source paths it changed (include both endpoints of a rename and tracked deletions; exclude `openspec/changes/` and internal state). The main agent verifies each result and serially runs `"$cash_cli" task done --change "<name>" <task-id> --path <path> [--path <path> ...]`. Use `--no-files` for a verified task with no source changes, never an omitted file list. Pass raw paths as separately quoted arguments. Shared files may appear in both task lists when both tasks modified disjoint regions; attribution is file-level, not hunk-level. Do not derive worker ownership from a whole-worktree diff. If any dispatched task fails or its file list cannot be established, pause and report; do not mark that task done. Explicit attribution is also required for `[P]` tasks executed sequentially as a fallback. Only ordinary non-`[P]` sequential tasks in document mode may retain the automatic snapshot-diff command above; dependency mode always requires explicit attribution.
 
    **Pause if:**
    - Task is unclear → ask for clarification
    <!-- BLOCKER-TRIAGE -->
-   - **繼續分支（機制替換，contract 不變）**：原設計指定的達成手段在目標平台或現實不可行，但要交付的觀察行為、interface／資料形狀、失敗模式與驗收標準都不變，且替代手段不需要 `a synchronization primitive, identity/generation type, or state machine not defined in design.md` → 依 Implementation Notes Protocol 記一筆 `deviation`，說明原手段與替代手段，然後繼續該 task，不暫停、不要求 `/cash-ingest`。當上述條件全部成立時，即使需要在多個都保留 contract 的替代手段之間選擇，也 SHALL 以記一筆 `deviation` 解決，不觸發暫停分支。
-   - **暫停分支（contract／範圍／行為變更）**：阻塞改變要交付的觀察行為、範圍或使用者可見的取捨，或替代手段需要 `a synchronization primitive, identity/generation type, or state machine not defined in design.md`，或存在其解答可能改變 contract 或範圍、需要使用者決定的 open question → 暫停、報告 blocker，並引導使用者前往 `/cash-ingest`。
+   ### Refuted premise triage
+
+   在 task loop 的 actual call flow 檢查或驗證執行後，若 evidence 顯示 task／design 的 refuted premise，先執行以下既有兩個互斥 blocker triage 分支。兩個分支優先於 bounded repair 與通用 error／blocker fallback；只有未被涵蓋的其他 failure 才能進入 fallback。
+
+   - **繼續分支（mechanism replacement，contract 不變）**：原設計指定的機制在目標平台或現實不可行，但 observable behavior、interface／data shape、failure modes、acceptance criteria 與 scope 全部不變，且替代手段不需要 `a synchronization primitive, identity/generation type, or state machine not defined in design.md` → 依 Implementation Notes Protocol 記錄 `deviation` 後繼續且不消耗 bounded repair budget。若在多個都保留 contract 的替代手段之間選擇，也屬此分支，不觸發 pause。
+   - **暫停分支（contract／範圍／行為變更）**：refuted premise 改變 contract、scope、observable behavior 或 user-visible trade-off，或替代手段需要 `a synchronization primitive, identity/generation type, or state machine not defined in design.md`，或存在其解答可能改變 contract／scope 的 open question → 記錄 evidence、暫停並導向 `/cash-ingest`。此分支不得以 generic fallback 或 repair budget 取代。
+
+   兩個分支 MUST 互斥：當繼續分支的條件全部成立時，不得走暫停分支；當任一暫停條件成立時，不得以 `deviation` 繞過。契約不變的 mechanism replacement 不消耗 bounded repair budget。
    - Other errors or blockers not covered by the blocker triage above → report and wait for guidance
    - User interrupts
+
+### Execution evidence protocol
+
+For every named executable verification target in this task loop, preserve恰好一個狀態；四態互斥：`passed-current`、`passed-prior`、`not-run`或`blocked`。一般執行失敗 MUST be `blocked` with `outcome_kind: failed`; an external unavailable prerequisite MUST be `blocked` with `outcome_kind: unavailable`，而 blocked evidence MUST preserve command、scope、result/diagnostic 與具體 blocker。Static conformance notes may remain separate, but純靜態 inspection MUST NOT算作 executed pass。
+
+Each execution evidence record MUST contain `command`、`scope`、`result_source`、`result`，以及 `source_fingerprints`、`test_fingerprints`、`config_fingerprints`、`environment_fingerprints` 四組 gate-specific identity。每組 identity 要嘛列出目前值，要嘛以具體理由標為不適用；environment identity 至少涵蓋 working directory、執行檔/version 與 target 實際讀取的環境變數。合法 prior 來源只包含仍可引用的原始 command output/host record，或帶有上述完整 shape 的 repository-owned record；摘要性 prose 不是合法來源。
+
+State selection uses deterministic precedence。任何 current execution outcome MUST優先於 `passed-prior`：current success MUST使用 `passed-current`，current failed/unavailable MUST使用對應的 `blocked` outcome kind，兩者都不得被 prior pass 遮蔽。只有本輪完全沒有可歸屬的 execution outcome 且決定重用 prior 時，才逐項比較 relevant identity；全部相符才可使用 `passed-prior`，任一 prior record/identity gate 缺失或不相符一律 `not-run`。後續相關 source、test、config 或 environment 變更會使舊的 current/prior pass 失效，必須重新分類。不得以 `blocked` 掩飾未嘗試。
+
+本 protocol 不新增 Cash CLI command，也不建立新的持久化格式；evidence stays in the current task/review handoff and the named command output。
+
+### Bounded repair and minimal parallel worker packet
+
+For a task failure, first apply the上述兩個互斥 blocker triage 分支。機制替換且 contract 不變時，依 Implementation Notes Protocol 記 `deviation` 後繼續且不消耗 repair budget；contract／範圍／行為變更或需要未定義設計機制時立即走 pause／ingest。Only after neither triage branch matches, classify an Expected behavioral RED (保留 RED evidence、繼續 GREEN、不計入 repair 次數) or a setup、syntax、compile 或 test repair。
+
+For non-RED repair, each attempt MUST be supported by new observation。The same task、normalized root cause and 首個具體 failure location define one causal family with最多兩次 repair；兩次內通過可依正常 task completion 繼續。改 command/scope、改寫 diagnostic 或重新分類 MUST NOT 重置 budget；沒有新證據的相同診斷再次出現，或第二次 repair 後仍失敗，立即停止、回報 attempts/observations/blocker，MUST NOT 進行第三次 repair；MUST NOT 勾選 task 完成。
+
+### Minimal parallel worker packet
+
+For each eligible parallel task selected by its mode, the main thread sends only this allowlist：task ID 與完整 checkbox description、allowed scope 與 target files/regions、相關 Implementation Contract excerpt、相關 Requirement/Scenario/Example blocks、primary verification 與 regression commands、success 與 red markers、effective TDD/audit flags，以及條件式 canonical discipline excerpts。TDD 開啟時附 TDD instructions；task 會修改 tests 時附 test-quality instructions；audit 開啟時附 audit instructions。
+
+The packet MUST exclude完整 proposal、完整 design、其他 tasks與無關 spec set。若 excerpt 不足、互相衝突或無法界定 allowed scope，worker MUST停止而不猜測並回報缺失／衝突。Worker MUST NOT 操作 Cash task tracking、執行 Cash task start/done、修改 task checkbox 或進行 bundle publication；main thread 保有 tracking ownership，並在驗證回傳後序列化 task completion 與 publication。
+
+Worker handoff MUST return task ID、精確 project-root-relative touched paths、每個具名 gate 的四態 execution evidence 與 unresolved blockers；不得以 whole-worktree diff 推導 ownership。這些 packet 規則適用於 document 的 `[P]` group 與 dependency 的 ready tasks，不取代 Step 5 的 mode eligibility。
 
 **Focused Implementation Discipline**
 
@@ -640,44 +673,44 @@ The trigger is guidance only — it MUST NOT block apply from proceeding when th
 **Output During Implementation**
 
 ```
-## Implementing: <change-name> (schema: <schema-name>)
+## 實作中：<change-name>（schema：<schema-name>）
 
-Working on task 3/7: <task description>
+正在處理 task 3/7：<task description>
 [...implementation happening...]
-✓ Task complete
+✓ 任務完成
 
-Working on task 4/7: <task description>
+正在處理 task 4/7：<task description>
 [...implementation happening...]
-✓ Task complete
+✓ 任務完成
 ```
 
 **Output On Completion**
 
 ```
-## Implementation Complete
+## 實作完成
 
 **Change:** <change-name>
 **Schema:** <schema-name>
 **Progress:** 7/7 tasks complete ✓
 
-### Completed This Session
+### 本次完成
 - [x] Task 1
 - [x] Task 2
 ...
 
-All tasks complete. The cash quality gate runs next; archive guidance is shown only if it passes.
+所有 tasks 已完成。接著執行 Cash quality gate；只有通過時才顯示 archive guidance。
 ```
 
-**Output On Pause (Issue Encountered)**
+**暫停輸出（遇到的問題）**
 
 ```
-## Implementation Paused
+## 實作已暫停
 
 **Change:** <change-name>
 **Schema:** <schema-name>
 **Progress:** 4/7 tasks complete
 
-### Issue Encountered
+### 遇到的問題
 <description of the issue>
 
 **Options:**
@@ -694,3 +727,11 @@ This skill supports the "actions on a change" model:
 
 - **Can be invoked anytime**: Before all artifacts are done (if tasks exist), after partial implementation, interleaved with other actions
 - **Allows artifact updates**: If implementation reveals design issues, suggest updating artifacts - not phase-locked, work fluidly
+
+## Instructions views and dependency schedule
+
+Use `"$cash_cli" instructions apply --change "<name>" --summary --json` only to display the shared state overview. Before starting a task or quality gate, fetch `"$cash_cli" instructions apply --change "<name>" --compact --json` and use its `schedule` plus the required artifact context; the compact view omits `tasks` by design and does not authorize skipping preflight, dormancy, notes recovery, review loop or four-state evidence. The unflagged apply view remains the complete shape.
+
+The compact `schedule` is `{mode, ready_ids, blocked_ids, dependencies}`. In `dependency` mode, execute only pending tasks whose predecessors are complete; in `document` mode, retain the next-task and contiguous `[P]` semantics. `parallel_tasks: false` or unavailable parallel tooling never permits violating dependencies. Content reuse is valid only while the `contextRef`, artifact identities and current execution evidence remain valid; fetch full instructions again after compaction or any identity change.
+
+When all tasks reach `all_done`, continue notes recovery, publication, review loop and four-state handoff. The main thread owns task attribution and runs `"$cash_cli" task done --change <name> <task-id> --path <path>` with only the actual endpoints; workers return implementation evidence and never mutate Cash tracking. A compact or summary view never bypasses the quality gate.

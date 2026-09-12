@@ -1,6 +1,7 @@
 ---
 name: cash-ingest
-description: "Update an existing Cash change from external context"
+description: "Update an existing Cash change from external context. Use when a plan or conversation decision changes an existing change's requirements."
+argument-hint: "[change-name|plan-file]"
 license: MIT
 metadata:
   author: cash
@@ -46,21 +47,21 @@ Update an existing Cash change — from a plan file or conversation context.
    b. **No argument, plan file detectable**:
    - Check conversation context for plan file path (plan mode system messages include the path like `~/.claude/plans/<name>.md`)
    - If found and the file exists → use the **AskUserQuestion tool** to ask:
-     - Option 1: Use the plan file
-     - Option 2: Use conversation context
+     - Option 1: 使用計畫檔
+     - Option 2: 使用對話內容
    - If the user picks plan file → proceed to Step 2
    - If the user picks conversation context → skip Step 2, go to Step 3
 
    c. **No argument, no plan file detectable**:
    - Check `~/.claude/plans/` for recent files
-   - If recent files exist → list 5 most recent with the **AskUserQuestion tool**, include "Use conversation context" as an additional option
+   - If recent files exist → list 5 most recent with the **AskUserQuestion tool**, include "使用對話內容" as an additional option
    - If the user picks a file → proceed to Step 2
    - If the user picks conversation context → skip Step 2, go to Step 3
 
    d. **Conversation context fallback** (no plan files found at all):
-   - Use conversation context to update artifacts
+   - 使用對話內容 to update artifacts
    - If conversation context is insufficient, use the **AskUserQuestion tool** to get more details
-   - Warn: "No plan file found. Using conversation context."
+   - Warn: "找不到計畫檔，使用對話內容。"
 
 2. **Parse the plan structure** (skip if using conversation context)
 
@@ -153,7 +154,7 @@ Update an existing Cash change — from a plan file or conversation context.
    - Remove or replace incomplete content only when supported by an explicit decision in the requirement source. Without that decision, preserve the content and ask about the conflict. Record what was superseded, the decision, and the affected artifacts in the change's design decision history (or proposal when no design exists), and include it in the final summary.
    - Preserve existing review records, implementation notes, and touched task attribution. Before rewriting or removing a pending task, check any existing `.cash-skills/state/touched/<change-name>.json` entries: if its exact description is already a `task_desc`, preserve that task and report the attribution conflict rather than silently changing the description or deleting its tracking entry. Existing explicit recovery guidance for a missing historical task still applies.
 
-   **Parallel task markers (`[P]`)**: When creating or updating the **tasks** artifact, first read `.cash.yaml`. If `parallel_tasks: true` is set, add `[P]` markers to new tasks that can be executed in parallel. Format: `- [ ] [P] Task description`. A task qualifies for `[P]` if it targets different files from other pending tasks AND has no dependency on incomplete tasks in the same group. When `parallel_tasks` is not enabled, do NOT add `[P]` markers — but still preserve any existing `[P]` markers already in the file.
+   **Mutually exclusive task authoring modes**: Preserve the existing schema and `task_order`. In `document` mode only, keep existing qualifying `[P]` markers and add markers for new independent tasks with disjoint regions when `parallel_tasks: true`. In `dependency` mode, do not add `[P]` markers; preserve legacy markers as text and synchronize `[after: ...]` references when adding or cancelling pending work. Never rewrite completed descriptions or touched provenance; keep migration steps independently buildable and verifiable.
 
    After creating each artifact, re-check status:
 
@@ -211,30 +212,43 @@ Update an existing Cash change — from a plan file or conversation context.
 
    Fix every failure inline using the existing context and the new plan/conversation source before running the CLI analyzer. Update incomplete design and task content so behavior contracts, verification criteria, and scope boundaries stay current with the new context. Preserve completed tasks unchanged.
 
-7. **Analyze-Fix Loop** (max 2 iterations)
+## Artifact readiness gate
 
-   ```bash
-   "$cash_cli" analyze <name> --json
-   ```
+`cash-propose` 與 `cash-ingest` 在 inline self-review 後、validation 與品質關卡前 MUST 使用相同的 bounded readiness gate。這個 gate 是有限的 artifact 準備度檢查：它只在有具體修正與新證據時消耗 correction budget。
 
-   1. Filter findings to **Critical and Warning only** (ignore Suggestion)
-   2. If no Critical/Warning findings → show "Artifacts look consistent ✓" and proceed
-   3. If Critical/Warning findings exist:
-      a. Show: "Found N issue(s), fixing... (attempt M/2)"
-      b. Fix each finding in the affected artifact
-      c. Re-run `"$cash_cli" analyze <name> --json`
-      d. Repeat up to 2 total iterations
-   4. After 2 attempts, if findings remain:
-      - Show remaining findings as a summary
-      - Proceed normally (do NOT block)
+### Analyze-Fix Loop
+
+執行 `"$cash_cli" analyze <name> --json`，並對每個 failing gate 最多兩次 correction。一次 correction 必須先指出具體 diagnostic 或新證據，實際修改受影響 artifact，再重跑同一 gate。只重跑 command、改寫 diagnostic、改變輸出 scope 或重新分類 MUST NOT 算作 progress，也 MUST NOT 重置 budget；若相同 diagnostic 沒有新進展，立即停止該 gate。
+
+Analyze 的 diagnostic signature multiset identity 使用 `(dimension, severity, stable_location)`；`stable_location` 與 validation 的 `stable_path` 只移除 terminal `:<decimal-line>`，保留其餘 path 或 location。Analyze identity 忽略 positional `id`、finding 順序、`summary`、`recommendation` 與其他可改寫 prose；validation identity 使用 `(code, stable_path)`，忽略 finding 順序與 `message`。兩者都必須保留相同 signature 的 occurrence count；reorder、summary／recommendation／message reword、無關 line shift 或無關 bytes edit 都不算 progress。無效、無關或只改文案的 edit MUST NOT 重置 budget。只有原 occurrence 消失，或由 dimension、severity 或 stable location 不同的 signature 取代，才算該 finding 有 progress。
+
+Suggestion 只作 advisory，先排除於 readiness 計數之外。排除 Suggestion 後，`Critical／Warnings-only／clean` 三個結果互斥且完整：有 Critical 是 Critical；沒有 Critical 但有 Warning 是 Warnings-only；兩者皆無是 clean，即使仍有 Suggestion。Warnings-only 可進入 validation 或完成摘要，但必須逐項保留，不得以「已解決」或等義文字描述。
+
+### JSON validation gate
+
+Analyze gate 通過後執行 `"$cash_cli" validate "<name>" --json`。Validation 也使用相同的最多兩次 correction、具體 diagnostic／新證據、實際 artifact edit、signature multiset、progress 與重複 diagnostic 停止規則；validation 未通過不得進入完成或 review 分支。
+
+### Not-ready handoff
+
+Critical 尚存或 validation 未通過時，第一段先回報 `not ready`，再列出 locations、原因與下一步。此 not-ready branch 優先於通用完成或 handoff fallback；不得顯示 ready completion、提供開始實作選項或 invoke `cash-apply`。
+
+## Grounded artifact claims
+
+在 proposal、design 或 task 寫下 grounded code-facing claims（現有 code、tests、configuration 或 runtime behavior）前，先讀取 claim 具名的最小來源範圍，並保存 path 與 symbol、heading 或 command；line number 不得是唯一定位。找不到支持時，移除事實斷言，或改寫為待驗證 task，或在會改變 contract／scope 時詢問使用者；不能把推測寫成事實。
+
+Artifact 中的 size、count、duration、percentage、frequency 或 performance 數字必須標為 `measured`、`estimated` 或使用者／規格直接指定的 contract value。`measured` 必須記錄 observation method 與 result source；`estimated` 必須具名可確認或推翻該數字的 measurement，並列出依賴該估算的決策。
+
+## Reader-facing output contract
+
+四個 workflow 的 user-visible status、question、heading 與 summary MUST 先說明結果與下一步，再提供 diagnostics、locations 與其他證據。Cash 內部術語首次出現時，必須用一句繁體中文說明它對使用者的意義。固定 user-visible literals 使用繁體中文：`使用計畫檔`、`使用對話內容`、`完成`、`開始實作`、`使用 change：`、`仍要繼續`、`停止`、`修正後繼續`、`繼續執行…`、`實作完成`、`本次完成`、`實作已暫停`、`遇到的問題`、`Artifacts 一致`、`發現 N 個問題，正在修正（第 M/2 次）`、`使用 TDD`、`不使用 TDD`。commands、paths、identifiers、schema fields 與 quoted source text MUST 保持 verbatim；不得以 emoji、顏色或僅有格式差異承載唯一狀態。
 
 8. **Validation**
 
    ```bash
-   "$cash_cli" validate "<name>"
+   "$cash_cli" validate "<name>" --json
    ```
 
-   If validation fails, fix errors and re-validate.
+   Read the JSON result. If validation fails after the bounded correction budget, use the `not ready` handoff above: report locations, reasons and next steps, do not show `完成`／`開始實作`, and do not invoke `/cash-apply`. Show the completion choices only when validation has passed.
 
 9. **Summary and next steps**
 
@@ -245,12 +259,12 @@ Update an existing Cash change — from a plan file or conversation context.
    - Validation result
 
    Use **AskUserQuestion tool** to confirm the workflow is complete. This ensures the workflow stops even when auto-accept is enabled. Provide exactly these options:
-   - **First option (will be auto-selected)**: "Done" — End the ingest workflow. Inform the user they can run `/cash-apply <change-name>` when ready.
-   - **Second option**: "Apply" — Invoke `/cash-apply <change-name>` to start implementation.
+   - **第一個選項（會自動選取）**：`完成` — 結束 ingest workflow，告知使用者準備好後可執行 `/cash-apply <change-name>`。
+   - **第二個選項**：`開始實作` — invoke `/cash-apply <change-name>` 開始實作。
 
    If **AskUserQuestion tool** is not available, display the summary and inform the user to run `/cash-apply <change-name>` when ready. Then STOP — do not continue.
 
-   **After the user responds**, if they chose "Done", the workflow is OVER. If they chose "Apply", invoke `/cash-apply <change-name>` to begin implementation.
+   **使用者回覆後**，若選擇 `完成`，workflow 結束；若選擇 `開始實作`，invoke `/cash-apply <change-name>` 開始實作。
 
 **Guardrails**
 
@@ -259,3 +273,13 @@ Update an existing Cash change — from a plan file or conversation context.
 - **NEVER** create new changes — ingest only updates existing changes. If no active change exists, direct user to `/cash-propose`
 - **NEVER** skip the artifact workflow to write code directly
 - If **AskUserQuestion tool** is not available, ask the same questions as plain text and wait for the user's response
+
+## Context and dependency handoff
+
+For every artifact update, fetch the full instructions and retain `contextRef`; if the reference changes, is missing or malformed, discard the reused context and fetch the full instructions again. Apply the returned `rules` and `template` while preserving completed content and the user's intent. `contextRef` does not substitute for source, test, configuration or environment evidence.
+
+Read `schema` and `task_order` from `.openspec.yaml` before updating `tasks.md`. Missing `task_order` means `document`; `dependency` tasks use `[after: 1.1, 1.2]` after the task label. Preserve task labels, exact checkbox descriptions, completed history and existing `[P]` markers; CLI ordinals are recalculated from the current task list and are not stable identity. When a requirement changes dependencies or scope, update the affected task graph together and send contract changes through `/cash-ingest` rather than silently changing execution behavior.
+
+### Artifact context reuse
+
+Cache only the full artifact context under the key `(canonical project root, change, schema, runtime version)`. The first artifact call has no `--omit-context`. On later calls, use `"$cash_cli" instructions <artifact-id> --change "<name>" --omit-context --json` only when that full context remains available; compare the returned `contextRef` before reuse. A changed, missing or malformed ref, unknown runtime version, different key or compaction loss requires a fresh full artifact instruction call. Always consume newly returned rules, template, dependencies and other dynamic fields. Context identity is never execution evidence.

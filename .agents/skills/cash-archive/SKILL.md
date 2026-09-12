@@ -1,6 +1,7 @@
 ---
 name: cash-archive
-description: "Archive a completed change"
+description: "Archive a completed change. Use when every task is done and the change is ready to apply its delta specs."
+argument-hint: "[change-name]"
 license: MIT
 metadata:
   author: cash
@@ -48,8 +49,8 @@ Archive a completed change.
 
    **If any artifacts are not `done`:**
    - Display warning listing incomplete artifacts
-   - Prompt user for confirmation to continue
-   - Proceed if user confirms
+   - Record them for the complete preview plan in step 5
+   - Do not request archive authorization here; the single authorization happens only after preview
 
 3. **Check task completion status**
 
@@ -94,42 +95,35 @@ Archive a completed change.
      - **停止本次封存（建議）**：改執行 `$cash-commit` 並在確認選項選 `Archive first, then commit together`，讓封存與提交進同一個 commit；選此項時 MUST NOT 呼叫 `"$cash_cli" archive`。
      - **仍要單獨封存**：知悉封存會刪除 touched state、後續 `$cash-commit` 退回封存 manifest 的時間點快照的後果後，繼續步驟 5，不再重複發問。
 
-5. **Perform the archive**
+5. **Build one archive preview and bind authorization**
 
-   Use the `"$cash_cli" archive` command, adding the resolved flags:
+   Resolve the three flags (`--skip-specs`, `--no-validate`, and `--mark-tasks-complete`) from this invocation. Run exactly one read-only JSON preview before asking for authorization:
 
    ```bash
-   "$cash_cli" archive <name>
-   "$cash_cli" archive <name> --skip-specs
-   "$cash_cli" archive <name> --mark-tasks-complete
+   "$cash_cli" archive <name> --preview --json [resolved flags]
    ```
 
-   **Optional flags:**
-   - `--skip-specs` — skip delta spec application; use only on the explicit request described in step 4
-   - `--mark-tasks-complete` — mark all incomplete tasks as complete before archiving
-   - `--no-validate` — skip the independent change validation gate only; safety and delta identity preflight remain mandatory
+   The preview is a complete plan. Parse and display its `schema_version`, `change`, `preview_id`, `archived_id`, `archived_path`, `flags`, `incomplete_artifacts`, `incomplete_tasks`, `validation_findings`, `spec_updates`, `warnings`, and `cleanup_plan` together. Display any already-known Critical quality findings with their locations in the same authorization unit; if none are known, state that explicitly, and do not invent findings or run another review. The plan's `spec_updates` are informational; the skill MUST NOT apply or synchronize specs independently. The `archived_path` is a repo-relative path returned by the CLI.
 
-   **If archive fails** with "already exists" error, suggest renaming existing archive.
+   A preview error — including a collision, delta or touched-state error, pending recovery, or invalid arguments — stops this invocation. Report the exact structured error and MUST NOT retry, stage files, clean state, or call archive execution. A preview that reports incomplete artifacts, incomplete tasks, or validation findings remains visible in the same plan; only an explicitly confirmed matching flag can allow the core gate to continue.
 
-   **If archive fails** on delta parse or `requirement_identity_mismatch`, report the exact error and fix the delta specs before re-running. `--skip-specs` does NOT bypass either check.
+   Ask for one authorization for the complete displayed plan, including the exact `preview_id`, selected flags, warnings, and cleanup implications. Cancellation or decline performs no checked execution and leaves the workspace unchanged.
 
-   **If archive fails** with `validation_failed`, report the exact error and give both ways forward: fix the validation findings and re-run, or re-run with `--no-validate` once the findings are judged acceptable. `--skip-specs` does NOT bypass this gate either.
+6. **Revalidate and execute once**
 
-   **If archive fails** with `tasks_incomplete`, report the exact error and re-run with `--mark-tasks-complete`; neither `--skip-specs` nor `--no-validate` bypasses this precondition.
+   Immediately after authorization, execute exactly one checked archive with the same flags and identity:
 
-   **If archive fails** with `touched_invalid` naming a `task_desc` that no longer exists in `tasks.md`, determine whether that task was renamed or removed. If renamed, update that entry's `task_desc` in `.cash-skills/state/touched/<name>.json` to the task's current description, then re-run archive. Editing `task_desc` to repair a rename is the one permitted manual edit to touched state; never delete the file. If removed, stop and run `$cash-ingest` with the current `touched_invalid` error and change name as conversation context so it selects the existing change and restores the exact `task_desc` as a completed `[x]` task in `tasks.md`, then re-run archive; do not edit or delete the touched entry, because its `files` remain attributed to that historical task. If restoring the exact `task_desc` would cause a task label conflict, stop and use `$cash-ingest` with the same conversation context to resolve the artifact conflict; do not guess a new label or reattribute `files`.
+   ```bash
+   "$cash_cli" archive <name> --check-preview <preview_id> --json [same resolved flags]
+   ```
 
-6. **Display summary**
+   The CLI rebuilds the complete plan under its execution guard. If content, flags, destination, date, warnings, or any `preview_id` input changed, it returns `archive_preview_stale`; stop without retry. Any execution error also stops; this invocation has exactly one preview and exactly one checked execution, and MUST NOT retry or manually roll back a successful archive.
 
-   Show archive completion summary including:
-   - Change name
-   - Schema that was used
-   - Archive location
-   - Spec sync status: `synced`, `skipped`, or `no delta specs` — the `**Specs:**` line reports `✓ Synced to main specs`, `Sync skipped (explicitly requested by the user)`, or `No delta specs` respectively
-   - Any legacy cleanup diagnostic returned by Cash; report it as a diagnostic only and do not re-read legacy state
-   - Note about any warnings (incomplete artifacts/tasks, or a `skipped` outcome)
+   On success, use only returned `archived_id` and returned `archived_path` verbatim. Do not construct an archive destination from a date, change name, repository root, or convention. Report `cleanup_warnings` and the `legacy_cleanup` diagnostic without re-reading or deleting state in the skill. A non-empty cleanup warning does not change proven archive success.
 
-   **Template selection**: use the **Output On Success With Warnings** template whenever there is at least one warning; an outcome of `skipped` is itself a warning. Include the skipped warning line only when the outcome is `skipped`.
+7. **Display summary**
+
+   Show archive completion summary including the returned change, schema, `archived_path`, `archived_id`, `specs_status`, `applied_specs`, `cleanup_warnings`, and legacy cleanup diagnostic. Use the **Output On Success With Warnings** template whenever `warnings` or `cleanup_warnings` is non-empty; an explicit `skipped` outcome is itself a warning. The returned `archived_path` remains authoritative for every displayed location.
 
 **Output On Success**
 
@@ -138,7 +132,7 @@ Archive a completed change.
 
 **Change:** <change-name>
 **Schema:** <schema-name>
-**Archived to:** openspec/changes/archive/YYYY-MM-DD-<name>/
+**Archived to:** <archived_path returned by the CLI>
 **Specs:** ✓ Synced to main specs
 
 All artifacts complete. All tasks complete.
@@ -151,7 +145,7 @@ All artifacts complete. All tasks complete.
 
 **Change:** <change-name>
 **Schema:** <schema-name>
-**Archived to:** openspec/changes/archive/YYYY-MM-DD-<name>/
+**Archived to:** <archived_path returned by the CLI>
 **Specs:** No delta specs
 
 All artifacts complete. All tasks complete.
@@ -164,7 +158,7 @@ All artifacts complete. All tasks complete.
 
 **Change:** <change-name>
 **Schema:** <schema-name>
-**Archived to:** openspec/changes/archive/YYYY-MM-DD-<name>/
+**Archived to:** <archived_path returned by the CLI>
 **Specs:** <✓ Synced to main specs | Sync skipped (explicitly requested by the user) | No delta specs>
 
 **Warnings:**
@@ -181,7 +175,7 @@ Review the archive if this was not intentional.
 ## Archive Failed
 
 **Change:** <change-name>
-**Target:** openspec/changes/archive/YYYY-MM-DD-<name>/
+**Target:** <path returned in the CLI error>
 
 Target archive directory already exists.
 
@@ -196,3 +190,7 @@ Target archive directory already exists.
 - Preserve .openspec.yaml when moving to archive (it moves with the directory)
 - Never delete touched or sync state directly; archive owns ensure, transaction, cleanup, and each legacy cleanup diagnostic
 - If **AskUserQuestion tool** is not available, ask the same questions as plain text and wait for the user's response
+
+### No-spec archive presentation
+
+`no-spec` 僅表示沒有 delta specs；預覽與 checked execution 仍必須顯示並驗證 `design.md`、`tasks.md`、implementation evidence、`preview_id`、validation findings、warnings、cleanup plan 與 transaction guard。輸出可標示 `Specs: No delta specs`，但不得因 schema 自動加入 `--skip-specs`、`--no-validate` 或其他 skip flag；只有本次使用者明確指定的 flag 才能傳入。no-spec capability／delta artifact conflict 仍由 CLI fail closed。保留一次 preview、一次 matching checked execution、destination／content identity 與 cleanup 診斷的原有保護，不能把 no-spec 當成免除 archive confirmation 或 validation 的捷徑。

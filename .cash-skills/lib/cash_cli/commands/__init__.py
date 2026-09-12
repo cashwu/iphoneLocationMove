@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from . import analyze, archive, create, discovery, drift, lifecycle, lint_round, search, tasks, validate
+from . import analyze, archive, create, discovery, drift, lifecycle, lint_round, scope, search, tasks, validate
 
 
 def execute(command: str, arguments: Sequence[str]) -> int:
@@ -24,6 +24,8 @@ def execute(command: str, arguments: Sequence[str]) -> int:
         return search.execute(arguments)
     if command == "lint-round":
         return lint_round.execute(arguments)
+    if command == "scope":
+        return scope.execute(arguments)
     if command in {"sync", "archive"}:
         return archive.execute(command, arguments)
     raise LookupError(command)

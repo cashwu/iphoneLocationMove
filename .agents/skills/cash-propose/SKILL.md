@@ -1,6 +1,7 @@
 ---
 name: cash-propose
-description: Create a Cash change proposal with sub-agent quality gates
+description: "Create a Cash change proposal with sub-agent quality gates. Use when a requirement needs a complete proposal before implementation."
+argument-hint: "[description]"
 license: MIT
 metadata:
   author: cash
@@ -43,8 +44,8 @@ If no argument is provided, the workflow will extract requirements from conversa
    - Check if the conversation context mentions a plan file path (plan mode system messages include the path like `<name>.md`)
    - If found, check whether that exact conversation-provided plan file path exists
    - If a plan file is found, use the **AskUserQuestion tool** to ask:
-     - Option 1: Use the plan file
-     - Option 2: Use conversation context
+     - Option 1: 使用計畫檔
+     - Option 2: 使用對話內容
    - If conversation context has no relevant discussion, mention this when presenting the choice
    - If the user picks the plan file → read it and extract:
      - `plan_title` (H1 heading) → use as requirement description
@@ -104,10 +105,10 @@ If no argument is provided, the workflow will extract requirements from conversa
 
    **Resume branch**: do not run `new change`. Read existing artifacts and `"$cash_cli" status --change "<name>" --json`; retain the existing schema, TDD choice, completed tasks, and review history. If the requested requirement changes existing scope or decisions, hand off to `$cash-ingest <name>` with the agreed update and end this propose run. Otherwise continue step 4b, skip creation of every existing artifact, and create only missing artifacts in dependency order. Inventory expected capability spec paths from the proposal even when CLI status reports specs as done; fill missing capability files before treating `applyRequires` as complete. Validate the completed set and use the existing review re-run rules; allocate round filenames after the highest existing number even when the previous run passed, and never overwrite completed round files.
 
-   **New branch**: only when the name is absent, run:
+   **New branch**: only when the name is absent, select `no-spec` only when no capability observable behavior changes; tooling or file extensions alone do not qualify. If spec impact is uncertain, select `spec-driven`. Create every new change with `--task-order dependency`; resume preserves the existing schema and task order. Then run:
 
    ```bash
-   "$cash_cli" new change "<name>" --agent codex
+   "$cash_cli" new change "<name>" --agent codex --schema "<selected-schema>" --task-order dependency
    ```
 
    If creation nevertheless reports an identity collision, stop and report it; do not overwrite or blindly retry.
@@ -118,8 +119,8 @@ If no argument is provided, the workflow will extract requirements from conversa
 
    - If an unindented `tdd:` line already exists, skip this question and do not append another line. This is the mechanical once-per-change check for both new and continue paths.
    - If the line is absent, use the **AskUserQuestion tool** to ask whether this change should use TDD. Offer exactly two choices:
-     - **Use TDD** — recommended for behavior changes or large scope; record `true`.
-     - **Do not use TDD** — recommended for documentation, metadata, or small behavior-preserving refactors; record `false`.
+     - **使用 TDD** — recommended for behavior changes or large scope; record `true`.
+     - **不使用 TDD** — recommended for documentation, metadata, or small behavior-preserving refactors; record `false`.
    - The existing Guardrails interaction fallback applies to this question.
    - After the user answers, append exactly one unindented line: `tdd: true` or `tdd: false`, terminated by LF. If `.openspec.yaml` is non-empty and does not end with LF, write exactly one LF separator before the new line so the existing tail and the new key cannot merge. Preserve the content of every existing line and do not modify `.cash.yaml`.
    - If the append fails, report the exact write error and stop the workflow. Do not continue to proposal authoring with an unrecorded choice.
@@ -139,6 +140,8 @@ If no argument is provided, the workflow will extract requirements from conversa
    ```bash
    "$cash_cli" instructions proposal --change "<name>" --json
    ```
+
+   For `no-spec`, write exactly `- Affected specs: none` inside `## Impact` and keep both New/Modified Capabilities sections empty or `(none)`. Use only the selected schema graph: do not create or require delta specs for no-spec; design, tasks, validation and the full quality gate still apply.
 
    Use the `template` returned by the CLI as the proposal structure. Fill in every section, using the change type to guide the narrative emphasis, then write the content via CLI:
 
@@ -173,7 +176,7 @@ If no argument is provided, the workflow will extract requirements from conversa
    Loop through artifacts in dependency order (skip proposal since it's already done):
 
    a. **For each artifact that is `ready` (dependencies satisfied)**:
-   - On resume, do not recreate an existing file even if the artifact is incomplete. Read it and retain its content; create only missing output files (for specs, compare the required capability paths individually). Correct invalid existing content through edits during validation, without discarding completed tasks. Stop and route to ingest if the correction changes the requested contract or scope.
+   - On resume, do not recreate an existing file even if the artifact is incomplete. Read it and retain its content; create only missing output files (for specs, compare the required capability paths individually). Correct invalid existing content through edits during validation, without discarding completed tasks. 停止並導向 ingest if the correction changes the requested contract or scope.
    - **Check if the artifact is optional**: If the artifact is NOT in the dependency chain of any `applyRequires` artifact (i.e., removing it would not block reaching apply), it is optional. Get its instructions and read the `instruction` field. If the instruction contains conditional criteria (e.g., "create only if any apply"), evaluate whether any criteria apply to this change based on the proposal content. If none apply, skip the artifact and show: "⊘ Skipped <artifact-id> (not needed for this change)". Then continue to the next artifact.
    - Get instructions:
      ```bash
@@ -248,13 +251,43 @@ If no argument is provided, the workflow will extract requirements from conversa
 
    The goal is predictable Chinese-facing artifacts for cash-propose while preserving exact technical references and keeping spec deltas compatible with master specs.
 
-8. **Validation**
+## Artifact readiness gate
+
+`cash-propose` 與 `cash-ingest` 在 inline self-review 後、validation 與品質關卡前 MUST 使用相同的 bounded readiness gate。這個 gate 是有限的 artifact 準備度檢查：它只在有具體修正與新證據時消耗 correction budget。
+
+### Analyze-Fix Loop
+
+執行 `"$cash_cli" analyze <name> --json`，並對每個 failing gate 最多兩次 correction。一次 correction 必須先指出具體 diagnostic 或新證據，實際修改受影響 artifact，再重跑同一 gate。只重跑 command、改寫 diagnostic、改變輸出 scope 或重新分類 MUST NOT 算作 progress，也 MUST NOT 重置 budget；若相同 diagnostic 沒有新進展，立即停止該 gate。
+
+Analyze 的 diagnostic signature multiset identity 使用 `(dimension, severity, stable_location)`；`stable_location` 與 validation 的 `stable_path` 只移除 terminal `:<decimal-line>`，保留其餘 path 或 location。Analyze identity 忽略 positional `id`、finding 順序、`summary`、`recommendation` 與其他可改寫 prose；validation identity 使用 `(code, stable_path)`，忽略 finding 順序與 `message`。兩者都必須保留相同 signature 的 occurrence count；reorder、summary／recommendation／message reword、無關 line shift 或無關 bytes edit 都不算 progress。無效、無關或只改文案的 edit MUST NOT 重置 budget。只有原 occurrence 消失，或由 dimension、severity 或 stable location 不同的 signature 取代，才算該 finding 有 progress。
+
+Suggestion 只作 advisory，先排除於 readiness 計數之外。排除 Suggestion 後，`Critical／Warnings-only／clean` 三個結果互斥且完整：有 Critical 是 Critical；沒有 Critical 但有 Warning 是 Warnings-only；兩者皆無是 clean，即使仍有 Suggestion。Warnings-only 可進入 validation 或完成摘要，但必須逐項保留，不得以「已解決」或等義文字描述。
+
+### JSON validation gate
+
+Analyze gate 通過後執行 `"$cash_cli" validate "<name>" --json`。Validation 也使用相同的最多兩次 correction、具體 diagnostic／新證據、實際 artifact edit、signature multiset、progress 與重複 diagnostic 停止規則；validation 未通過不得進入完成或 review 分支。
+
+### Not-ready handoff
+
+Critical 尚存或 validation 未通過時，第一段先回報 `not ready`，再列出 locations、原因與下一步。此 not-ready branch 優先於通用完成或 handoff fallback；不得顯示 ready completion、提供開始實作選項或 invoke `cash-apply`。
+
+## Grounded artifact claims
+
+在 proposal、design 或 task 寫下 grounded code-facing claims（現有 code、tests、configuration 或 runtime behavior）前，先讀取 claim 具名的最小來源範圍，並保存 path 與 symbol、heading 或 command；line number 不得是唯一定位。找不到支持時，移除事實斷言，或改寫為待驗證 task，或在會改變 contract／scope 時詢問使用者；不能把推測寫成事實。
+
+Artifact 中的 size、count、duration、percentage、frequency 或 performance 數字必須標為 `measured`、`estimated` 或使用者／規格直接指定的 contract value。`measured` 必須記錄 observation method 與 result source；`estimated` 必須具名可確認或推翻該數字的 measurement，並列出依賴該估算的決策。
+
+## Reader-facing output contract
+
+四個 workflow 的 user-visible status、question、heading 與 summary MUST 先說明結果與下一步，再提供 diagnostics、locations 與其他證據。Cash 內部術語首次出現時，必須用一句繁體中文說明它對使用者的意義。固定 user-visible literals 使用繁體中文：`使用計畫檔`、`使用對話內容`、`完成`、`開始實作`、`使用 change：`、`仍要繼續`、`停止`、`修正後繼續`、`繼續執行…`、`實作完成`、`本次完成`、`實作已暫停`、`遇到的問題`、`Artifacts 一致`、`發現 N 個問題，正在修正（第 M/2 次）`、`使用 TDD`、`不使用 TDD`。commands、paths、identifiers、schema fields 與 quoted source text MUST 保持 verbatim；不得以 emoji、顏色或僅有格式差異承載唯一狀態。
+
+9. **Validation**
 
     ```bash
-    "$cash_cli" validate "<name>"
+    "$cash_cli" validate "<name>" --json
     ```
 
-    If validation fails, fix errors and re-validate.
+    Read the JSON result. If validation fails after the bounded correction budget, use the `not ready` handoff above: report locations, reasons and next steps, do not enter the quality gate, and do not invoke `cash-apply`. Enter the quality gate only when validation has passed.
 
 
 9. **Sub-Agent Review/Rating/Fix Loop**
@@ -543,7 +576,7 @@ If no argument is provided, the workflow will extract requirements from conversa
 - **IMPORTANT**: `context` and `rules` are constraints for YOU, not content for the file
   - Do NOT copy `<context>`, `<rules>`, `<project_context>` blocks into the artifact
   - These guide what you write, but should never appear in the output
-- **Parallel task markers (`[P]`)**: When creating the **tasks** artifact, first read `.cash.yaml`. If `parallel_tasks: true` is set, add `[P]` markers to tasks that can be executed in parallel. Format: `- [ ] [P] Task description`. A task qualifies for `[P]` if it targets different files from other pending tasks AND has no dependency on incomplete tasks in the same group. When `parallel_tasks` is not enabled, do NOT add `[P]` markers.
+- **Mutually exclusive task authoring modes**: Read the existing `task_order` before creating tasks. In `document` mode only, preserve the contiguous `[P]` policy: with `parallel_tasks: true`, mark independent tasks with disjoint delivery regions `[P]`; otherwise do not add markers. In `dependency` mode, do not add `[P]` markers; declare `[after: 1.1, 1.2]` after the document label, preserve legacy markers only as text, and let the CLI compute the ready set. Split work into independently verifiable vertical behavior slices; migration dependencies proceed through compatible addition, consumer migration, then removal, keeping each stage buildable.
 
 **Guardrails**
 
@@ -552,3 +585,13 @@ If no argument is provided, the workflow will extract requirements from conversa
 - **NEVER** reinterpret requirements by ignoring the proposal file
 - **NEVER** invoke the `cash-apply` skill — this workflow ends after artifact creation. The user decides when to start implementation
 - If **AskUserQuestion tool** is not available, ask the same questions as plain text and wait for the user's response
+
+## Context and task-order handoff
+
+Before each artifact decision, use the full artifact instructions from `"$cash_cli" instructions <artifact-id> --change "<name>" --json`. Retain its `contextRef` as the identity of the current project context; a changed, missing or malformed `contextRef` requires fetching the full instructions again. `contextRef` never replaces source, test, configuration or environment evidence.
+
+Read the change metadata's `schema` and `task_order` before writing `tasks.md`. `task_order` defaults to `document`; when it is `dependency`, preserve each task's original checkbox description and declare dependencies as `[after: 1.1, 1.2]` after its task label. Do not invent labels or rewrite completed task history or CLI ordinals. Keep each task vertical: it names its behavior, delivery paths, primary `verification`, related `regression`, direct `success` marker and `red` marker or its N/A classification reason.
+
+### Artifact context reuse
+
+Cache only the full artifact context under the key `(canonical project root, change, schema, runtime version)`. The first artifact call has no `--omit-context`. On later calls, use `"$cash_cli" instructions <artifact-id> --change "<name>" --omit-context --json` only when that full context remains available; compare the returned `contextRef` before reuse. A changed, missing or malformed ref, unknown runtime version, different key or compaction loss requires a fresh full artifact instruction call. Always consume newly returned rules, template, dependencies and other dynamic fields. Context identity is never execution evidence.

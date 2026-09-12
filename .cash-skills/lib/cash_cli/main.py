@@ -90,6 +90,10 @@ def _lint_round(arguments: Sequence[str]) -> int:
     return _execute_command("lint-round", arguments)
 
 
+def _scope(arguments: Sequence[str]) -> int:
+    return _execute_command("scope", arguments)
+
+
 def _sync(arguments: Sequence[str]) -> int:
     return _execute_command("sync", arguments)
 
@@ -115,6 +119,7 @@ COMMANDS: dict[str, Handler] = {
     "sync": _sync,
     "search": _search,
     "lint-round": _lint_round,
+    "scope": _scope,
 }
 
 

@@ -6,7 +6,8 @@ import re
 from collections.abc import Sequence
 
 from ..errors import CashError
-from ..validation import validate_change
+from ..validation import no_spec_conflicts, validate_change
+from ..workflow import graph_for_change, read_change_metadata
 from ..workspace import Workspace
 from .discovery import _artifact_done, _change_directory, _tasks
 
@@ -26,14 +27,17 @@ def _spec_text(workspace: Workspace, change) -> str:
 
 def analyze_payload(workspace: Workspace, name: str) -> dict[str, object]:
     change = _change_directory(workspace, name)
+    metadata = read_change_metadata(workspace, name)
+    graph = graph_for_change(workspace, name)
+    graph_ids = [artifact.id for artifact in graph]
     available = [
         artifact_id
-        for artifact_id in ("proposal", "design", "specs", "tasks")
+        for artifact_id in graph_ids
         if _artifact_done(workspace, change, artifact_id)
     ]
     missing = [
         artifact_id
-        for artifact_id in ("proposal", "design", "specs", "tasks")
+        for artifact_id in graph_ids
         if artifact_id not in available
     ]
     findings: list[dict[str, object]] = []
@@ -44,7 +48,7 @@ def analyze_payload(workspace: Workspace, name: str) -> dict[str, object]:
         "Gaps": [],
     }
 
-    if {"specs", "tasks"}.issubset(available):
+    if metadata.schema != "no-spec" and {"specs", "tasks"}.issubset(available):
         specs = _spec_text(workspace, change)
         task_text = workspace.read_text(workspace.relative(change / "tasks.md"))
         for title in _REQUIREMENT.findall(specs):
@@ -59,8 +63,9 @@ def analyze_payload(workspace: Workspace, name: str) -> dict[str, object]:
                     }
                 )
 
-    if len(available) == 4:
-        for validation in validate_change(workspace, name):
+    validations = validate_change(workspace, name) if set(graph_ids).issubset(available) else (no_spec_conflicts(workspace, name) if metadata.schema == "no-spec" else [])
+    if validations:
+        for validation in validations:
             dimension_findings["Consistency"].append(
                 {
                     "dimension": "Consistency",
@@ -71,7 +76,7 @@ def analyze_payload(workspace: Workspace, name: str) -> dict[str, object]:
                 }
             )
 
-    if "specs" in available:
+    if metadata.schema != "no-spec" and "specs" in available:
         specs = _spec_text(workspace, change)
         lines = specs.splitlines()
         scenarios = [
@@ -125,10 +130,14 @@ def analyze_payload(workspace: Workspace, name: str) -> dict[str, object]:
         "Ambiguity": {"specs"},
         "Gaps": {"proposal", "tasks"},
     }
+    if metadata.schema == "no-spec":
+        requirements["Consistency"] = {"proposal", "design", "tasks"}
     finding_id = 0
     for dimension in ("Coverage", "Consistency", "Ambiguity", "Gaps"):
         current = dimension_findings[dimension]
-        if not requirements[dimension].issubset(available):
+        if metadata.schema == "no-spec" and dimension in {"Coverage", "Ambiguity"}:
+            status = "Skipped (not applicable: no-spec)"
+        elif not requirements[dimension].issubset(available):
             status = "Skipped (insufficient artifacts)"
         elif current:
             status = f"{len(current)} issue(s) found"

@@ -1,6 +1,7 @@
 ---
 name: cash-verify
-description: "Verify implementation matches artifacts"
+description: "Verify implementation matches artifacts. Use when a change needs task, requirement, and design conformance checked before archiving."
+argument-hint: "[change-name]"
 license: MIT
 metadata:
   author: cash
@@ -62,6 +63,20 @@ Verify that an implementation matches the change artifacts (specs, tasks, design
    - For either non-blocked state, a missing `preflight`, `missingFiles`, `driftedFiles`, or `staleness` field is a contract error. Report `critical` missing files and stop, show `warnings` before continuing, and silently continue for `clean`.
    - Any other state or missing required field is a contract error; report it and stop.
    - Read all available artifacts from `contextFiles`.
+
+   Before mapping requirements, resolve the implementation scope through the shared read-only command:
+
+   ```bash
+   "$cash_cli" scope --change "<name>" [--base "<base-revision>"] [--support "<path>"]... --json
+   ```
+
+   Use the returned `scope_source`, `base_revision`, `head_revision`, `files`, `supporting_files`, `limitations` and `snapshot_id` as the evidence boundary. The selected `staged`, `unstaged`, `untracked` and, when explicitly requested, `committed` layers are the only implementation inputs. Every supporting path carries its HEAD/index/worktree typed states, corresponding content or tombstones, and an explicit base state when selected. Without an explicit `--base`, do not infer committed history. An empty scope is not a completed clean verification. Any declaration, type, callee, configuration or test read must first be listed with `--support`; rerun the same selector set with `--check-snapshot "<snapshot_id>" --json` before reporting. A `scope_insufficient`, `scope_stale` or `scope_unstable` result remains a limitation and cannot become a clean verification claim.
+
+For a `no-spec` change, mark spec mapping, delta scenario and example checks as not applicable while still verifying `design.md`, `tasks.md`, execution evidence and current failures. A no-spec result does not authorize skipping required artifacts or evidence.
+
+### No-spec verification handoff
+
+對 `no-spec` change，驗證報告必須保留 `design.md`、`tasks.md`、implementation scope 與每項 execution evidence；spec mapping、delta scenario、example mapping 才標示為 `not applicable`。重用先前結果時，逐項比較其 `source_fingerprints`、`test_fingerprints`、`config_fingerprints` 與 `environment_fingerprints` 內容 identity；`contextRef` 只能證明 artifact context 相同，不能代替這些 identity，也不能證明測試通過。任一 identity 缺失或改變，先重新讀取對應內容並重跑必要檢查；本輪 current failure 優先於任何 prior pass。缺少 `design.md`、tasks、scope 或 evidence 時，保留具體缺口，不能因 no-spec 而完成驗證。
 
 4. **Initialize verification report structure**
 
@@ -136,6 +151,16 @@ Verify that an implementation matches the change artifacts (specs, tasks, design
      - Add SUGGESTION: "Code pattern deviation: <details>"
      - Recommendation: "Consider following project pattern: <example>"
 
+## Execution evidence protocol
+
+For every named executable test、compiler、linter、CLI or other verification target, preserve恰好一個狀態；四態互斥：`passed-current`、`passed-prior`、`not-run`或`blocked`。一般執行失敗 MUST be `blocked` with `outcome_kind: failed`; an external unavailable prerequisite MUST be `blocked` with `outcome_kind: unavailable`，而 blocked evidence MUST preserve command、scope、result/diagnostic 與具體 blocker。Requirement mapping、scenario coverage、design adherence 等結論可保留，但純靜態 inspection MUST NOT算作 executed pass。
+
+Each execution evidence record MUST contain `command`、`scope`、`result_source`、`result`，以及 `source_fingerprints`、`test_fingerprints`、`config_fingerprints`、`environment_fingerprints` 四組 gate-specific identity。每組 identity 要嘛列出目前值，要嘛以具體理由標為不適用；environment identity 至少涵蓋 working directory、執行檔/version 與 target 實際讀取的環境變數。合法 prior 來源只包含仍可引用的原始 command output/host record，或帶有上述完整 shape 的 repository-owned record；摘要性 prose 不是合法來源。
+
+State selection uses deterministic precedence。任何 current execution outcome MUST優先於 `passed-prior`：current success MUST使用 `passed-current`，current failed/unavailable MUST使用對應的 `blocked` outcome kind，兩者都不得被 prior pass 遮蔽。只有本輪完全沒有可歸屬的 execution outcome 且決定重用 prior 時，才逐項比較 relevant identity；全部相符才可使用 `passed-prior`，任一 prior record/identity gate 缺失或不相符一律 `not-run`。後續相關 source、test、config 或 environment 變更會使舊的 current/prior pass 失效，必須重新分類。不得以 `blocked` 掩飾未嘗試。
+
+本 protocol 不新增 Cash CLI command，也不建立新的持久化格式；evidence stays in the current verification handoff and the named command output。
+
 8. **Generate Verification Report**
 
    **Summary Scorecard**:
@@ -196,3 +221,7 @@ Use clear markdown with:
 - Code references in format: `file.ts:123`
 - Specific, actionable recommendations
 - No vague suggestions like "consider reviewing"
+
+### Supporting snapshot lifecycle
+
+Use only captured content for analysis. Before the first read of any supporting path, include it in `--support`. On support expansion, discard all findings, capture the complete selector set again, and restart analysis from that new content. Keep one external-drift rebuild budget across the entire analysis, including support expansions; expansion never resets the consumed budget. Before reporting, check the same complete support set with `--check-snapshot`. The first external drift discards findings and rebuilds the full scope once; a second external drift stops with an unstable limitation. An insufficient capture cannot produce a clean result.
