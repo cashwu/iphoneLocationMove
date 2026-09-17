@@ -2,12 +2,14 @@
 id: privileged-boundary-no-real-acceptance
 type: recurring-finding
 status: open
-occurrences: 2
+occurrences: 3
 first_seen: 2026-07-26
-last_seen: 2026-07-27
+last_seen: 2026-09-17
 links:
   - openspec/changes/add-macos-location-simulator/reviews/propose-r1.md
   - openspec/changes/add-macos-location-simulator/reviews/apply-r1.md
+  - openspec/changes/fix-ios-27-usb-tunnel/reviews/propose-r1.md
+  - openspec/changes/fix-ios-27-usb-tunnel/reviews/propose-r2.md
 ---
 # Privileged boundary 只有 unit contract test
 
@@ -17,3 +19,4 @@ audit token、root ownership、daemon cleanup、runtime tamper 與 uninstall 行
 
 - 2026-07-26 — `add-macos-location-simulator` — `cash-propose` Round 1：privileged helper 最初缺少需管理員核准的真實環境 gate。
 - 2026-07-27 — `add-macos-location-simulator` — `cash-apply` Round 1：task 7.3 將 user-space fake harness 與正向 production smoke 合併宣稱完整 privileged adversarial acceptance，未在真實 XPC／SMJobBless boundary驗證負向案例。
+- 2026-09-17 — `fix-ios-27-usb-tunnel` — `cash-propose` Round 1–2：production gate 最初只執行 positive tunnel start，補齊 real XPC cases後又漏掉 master contract要求的 uninstall final cleanup。

@@ -1,5 +1,13 @@
 # Production privileged-helper acceptance
 
+本手冊固定使用 `pymobiledevice3-11.13.0` runtime；runner 不接受任何參數，並只
+依同目錄 `cases.json` 的 manifest expected／expectedError 執行固定 case。固定
+runtime root 是：
+
+```text
+/Library/Application Support/iPhoneLocationMove/TunnelRuntime/pymobiledevice3-11.13.0/
+```
+
 本手冊只用固定 case、固定安裝位置與固定 `/tmp/iphone-location-move-acceptance` 工作目錄。DEBUG App runner 只接受：
 
 ```text
@@ -10,7 +18,7 @@
 
 ## 1. 準備原始 signed App
 
-連接且只保留一台 iOS 17+ USB iPhone，確認已信任 Mac、已開啟 Developer Mode。從 repository root 執行：
+連接且只保留一台 iOS 27 USB iPhone，確認已信任 Mac、已開啟 Developer Mode。從 repository root 執行：
 
 ```sh
 rm -rf /tmp/iphone-location-move-acceptance
@@ -36,13 +44,21 @@ sudo launchctl print system/com.cash.iPhoneLocationMoveTunnelHelper
 sudo stat -f '%Su:%Sg %Mp%Lp %N' \
   /Library/PrivilegedHelperTools/com.cash.iPhoneLocationMoveTunnelHelper \
   /Library/LaunchDaemons/com.cash.iPhoneLocationMoveTunnelHelper.plist \
-  '/Library/Application Support/iPhoneLocationMove/TunnelRuntime/current' \
-  '/Library/Application Support/iPhoneLocationMove/TunnelRuntime/current/runtime-seal.json'
+  '/Library/Application Support/iPhoneLocationMove/TunnelRuntime/pymobiledevice3-11.13.0' \
+  '/Library/Application Support/iPhoneLocationMove/TunnelRuntime/pymobiledevice3-11.13.0/runtime-seal.json'
 sudo shasum -a 256 /Library/PrivilegedHelperTools/com.cash.iPhoneLocationMoveTunnelHelper
 codesign -dv --verbose=4 /Library/PrivilegedHelperTools/com.cash.iPhoneLocationMoveTunnelHelper
 ```
 
 ## 2. 每個 case 的固定 evidence
+
+依 manifest 順序執行 `positive-start`、`device-session-ready`、
+`pending-duplicate`、`lost-reply-retry`、`endpoint-timeout`、
+`connection-invalidation`、`app-termination`、`startup-reconcile`、
+`runtime-seal-tamper`、`invalid-signature` 與 `team-id-mismatch`。其中
+`device-session-ready` 會經由 App 的實際 `PymobiledeviceAdapter.connect()` 完成
+USB discovery、trust、Developer Mode、DDI、pinned tunnel 與 DVT，確認
+`currentSessionState()` 發布 `.ready` 後才成功；不是 always-ready shortcut。
 
 每個 case 執行前後都執行以下 snapshot，保存到
 `/tmp/iphone-location-move-acceptance/results/<case>-before.txt` 與
@@ -51,12 +67,28 @@ codesign -dv --verbose=4 /Library/PrivilegedHelperTools/com.cash.iPhoneLocationM
 ```sh
 pgrep -alf 'iPhoneLocationMoveTunnelHelper|pymobiledevice3.*remote.*tunnel|TunnelRuntime' || true
 sudo launchctl print system/com.cash.iPhoneLocationMoveTunnelHelper
-sudo find '/Library/Application Support/iPhoneLocationMove/TunnelRuntime/current' \
+sudo find '/Library/Application Support/iPhoneLocationMove/TunnelRuntime/pymobiledevice3-11.13.0' \
   -xdev -print0 | sudo xargs -0 stat -f '%Su:%Sg %Mp%Lp %N'
 ```
 
+固定 runner 會保存每個 case 的 stdout／stderr、typed result 與 before／after
+snapshot，並只接受 manifest 指定的 typed `errorCode`：
+
+```sh
+sudo bash iPhoneLocationMoveTunnelHelper/Acceptance/run-production-acceptance.sh
+```
+
 runner stdout 是該 case 唯一的 lease／typed-error result，直接保存為
-`/tmp/iphone-location-move-acceptance/results/<case>.json`。以原始 App 執行：
+`/tmp/iphone-location-move-acceptance/results/<case>.json`。
+
+runner 會自動完成 acceptance 所需的固定 orchestration：以登入中的 console user
+啟動 signed App（runner 本身仍須以 root 執行）、建立並驗證
+`signature-invalid.app`／`team-mismatch.app` caller trust copies、在需要乾淨狀態的
+case 前重建 versioned runtime、準備 endpoint-timeout 與 runtime-seal-tamper fixture，
+並保存 host/device version、fixture identity 與 process snapshots。以下手動命令只供
+低階診斷，不是 acceptance 的替代執行路徑。
+
+若需低階診斷，可直接以原始 App 執行固定 case（這不會取代 runner 的完整驗收）：
 
 ```sh
 '/tmp/iphone-location-move-acceptance/DerivedData/Build/Products/Debug/iPhoneLocationMove.app/Contents/MacOS/iPhoneLocationMove' \
@@ -68,9 +100,10 @@ runner stdout 是該 case 唯一的 lease／typed-error result，直接保存為
 `connection-invalidation`／`app-termination` 的 after snapshot MUST 顯示相關
 tunnel process count 回到 0；下一個 `startup-reconcile` MUST 成功。
 
-## 3. Caller trust fixtures
+## 3. Caller trust fixtures（runner 自動準備）
 
-固定建立兩份 copy：
+固定 runner 會在第一個 case 前建立兩份 copy；不需要手動建立。若需診斷 fixture
+內容，下面的固定命令描述 runner 採用的相同 layout：
 
 ```sh
 cp -R \
@@ -91,11 +124,11 @@ connection rejection 的 `tunnel-failure`；before／after process count MUST �
 MUST NOT 建立 lease。
 用 `codesign -dv --verbose=4` 保存原始 App 與兩份 copy 的 identifier／TeamIdentifier。
 
-## 4. Runtime seal tamper fixtures
+## 4. Runtime seal tamper fixtures（runner 自動準備）
 
-每個 tamper case 前先刪除 current runtime，再以原始 signed App 執行
+每個 tamper case 前 runner 會先刪除 pinned-version runtime，再以原始 signed App 執行
 `positive-start` 讓 helper 從已驗證的 wheelhouse 重新建立乾淨 runtime。只在
-`/Library/Application Support/iPhoneLocationMove/TunnelRuntime/current` 進行以下
+`/Library/Application Support/iPhoneLocationMove/TunnelRuntime/pymobiledevice3-11.13.0` 進行以下
 單一變更：
 
 - missing：移除一個 seal 內列出的 generated file；
@@ -108,20 +141,21 @@ MUST NOT 建立 lease。
 
 每次都執行 `runtime-seal-tamper`。結果 MUST 為 `passed: true` 且帶
 `tunnel-failure` typed error，before／after tunnel process count MUST 都是 0。
-完成單一 case 後立即刪除 current runtime，再由原始 signed App 重建，避免 tamper
+完成單一 case 後立即刪除 pinned-version runtime，再由原始 signed App 重建，避免 tamper
 互相污染。
 
-`endpoint-timeout` 使用同目錄
+`endpoint-timeout` runner 會使用同目錄
 `fixtures/endpoint-timeout.py` 的固定內容：由管理員將其複製成 root-owned mode
 `0700` generated executable，依目前完整 file set
-重新產生 root-owned mode `0600` seal，再執行 `endpoint-timeout`。runner MUST
+重新產生 root-owned mode `0600` seal，再執行 `endpoint-timeout`。runner 必須
 收到 handshake timeout；15 秒後 after snapshot MUST 無 tunnel process。此 fixture
-只能位於上述 root-owned current runtime，禁止讓 helper 執行 repository、
+只能位於上述 root-owned pinned-version runtime，禁止讓 helper 執行 repository、
 `/tmp` 或其他 user-writable path。
 
-固定準備工具 `prepare-endpoint-timeout.py` 不接受任何參數，將相同 fixture 內容
-直接寫入上述 root-owned executable 並重建完整 seal；它只供管理員授權的
-acceptance 環境使用，不會編入 App 或 helper：
+固定準備工具 `prepare-endpoint-timeout.py` 不接受任何參數，runner 會在該 case
+前呼叫它；它將相同 fixture 內容直接寫入上述 root-owned executable 並重建完整
+seal。它只供管理員授權的 acceptance 環境使用，不會編入 App 或 helper；以下命令
+僅供低階診斷：
 
 ```sh
 sudo /usr/bin/python3 \
@@ -136,7 +170,7 @@ sudo /usr/bin/python3 \
 sudo launchctl bootout system/com.cash.iPhoneLocationMoveTunnelHelper || true
 sudo rm -f /Library/PrivilegedHelperTools/com.cash.iPhoneLocationMoveTunnelHelper
 sudo rm -f /Library/LaunchDaemons/com.cash.iPhoneLocationMoveTunnelHelper.plist
-sudo rm -rf '/Library/Application Support/iPhoneLocationMove'
+sudo rm -rf '/Library/Application Support/iPhoneLocationMove/TunnelRuntime'
 ```
 
 最終 MUST 同時確認：
@@ -144,7 +178,7 @@ sudo rm -rf '/Library/Application Support/iPhoneLocationMove'
 ```sh
 test ! -e /Library/PrivilegedHelperTools/com.cash.iPhoneLocationMoveTunnelHelper
 test ! -e /Library/LaunchDaemons/com.cash.iPhoneLocationMoveTunnelHelper.plist
-test ! -e '/Library/Application Support/iPhoneLocationMove'
+test ! -e '/Library/Application Support/iPhoneLocationMove/TunnelRuntime'
 sudo launchctl print system/com.cash.iPhoneLocationMoveTunnelHelper
 pgrep -alf 'iPhoneLocationMoveTunnelHelper|pymobiledevice3.*remote.*tunnel|TunnelRuntime'
 ```
@@ -152,3 +186,8 @@ pgrep -alf 'iPhoneLocationMoveTunnelHelper|pymobiledevice3.*remote.*tunnel|Tunne
 最後兩個查詢預期找不到 service／process。將所有 JSON、snapshot、signature、
 owner／mode／digest 與 cleanup 結果摘要追加到 change 的
 `acceptance-results.md`，並逐項標明 `production` 或 `deterministic` evidence。
+
+runner 會在所有 case 後不可跳過地執行 uninstall final phase，並輸出
+`final-cleanup.json`；`serviceAbsent`、`helperToolAbsent`、
+`launchDaemonPlistAbsent`、`runtimeParentAbsent` 與 `rootProcessesAbsent` 必須
+全部為 `true`，否則整體 acceptance 失敗。

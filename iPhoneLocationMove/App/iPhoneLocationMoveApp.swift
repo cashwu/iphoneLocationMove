@@ -5,6 +5,7 @@ import SwiftUI
 #if DEBUG
 enum PrivilegedHelperAcceptanceCase: String, CaseIterable, Codable, Sendable {
     case positiveStart = "positive-start"
+    case deviceSessionReady = "device-session-ready"
     case pendingDuplicate = "pending-duplicate"
     case lostReplyRetry = "lost-reply-retry"
     case endpointTimeout = "endpoint-timeout"
@@ -60,6 +61,26 @@ private enum PrivilegedHelperAcceptanceRunner {
         _ acceptanceCase: PrivilegedHelperAcceptanceCase
     ) async -> PrivilegedHelperAcceptanceResult {
         do {
+            if acceptanceCase == .deviceSessionReady {
+                let adapter = try PymobiledeviceAdapter.live()
+                let session = try await adapter.connect()
+                guard case let .ready(readySession) = await adapter.currentSessionState(),
+                      readySession == session
+                else {
+                    try? await adapter.teardownForQuit()
+                    return failure(
+                        acceptanceCase,
+                        code: "device-session-not-ready",
+                        detail: "Actual device preparation did not publish a ready session."
+                    )
+                }
+                try await adapter.teardownForQuit()
+                return success(
+                    acceptanceCase,
+                    detail: "DVT/device session ready"
+                )
+            }
+
             let client = LiveTunnelClient()
             if acceptanceCase == .startupReconcile {
                 try await client.reconcile()
@@ -96,6 +117,9 @@ private enum PrivilegedHelperAcceptanceRunner {
                     leaseID: lease.id.rawValue.uuidString,
                     detail: "start/status/stop completed with state \(status.state.rawValue)"
                 )
+
+            case .deviceSessionReady:
+                preconditionFailure("Handled before tunnel-client acceptance cases")
 
             case .pendingDuplicate:
                 try await client.reconcile()

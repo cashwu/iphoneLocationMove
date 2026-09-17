@@ -10,7 +10,7 @@ import sys
 
 
 RUNTIME_ROOT = Path(
-    "/Library/Application Support/iPhoneLocationMove/TunnelRuntime/current"
+    "/Library/Application Support/iPhoneLocationMove/TunnelRuntime/pymobiledevice3-11.13.0"
 )
 EXECUTABLE = RUNTIME_ROOT / "runtime/pymobiledevice3"
 SEAL = RUNTIME_ROOT / "runtime-seal.json"

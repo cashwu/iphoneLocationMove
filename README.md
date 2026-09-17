@@ -151,10 +151,11 @@ App 專用的使用者層 runtime 位於：
 ```
 
 privileged helper 不會透過網路安裝套件。它只使用 App 內嵌、固定版本、經
-code signature 與 SHA-256 trust anchor 驗證的離線 wheelhouse，並原子安裝到：
+code signature 與 SHA-256 trust anchor 驗證的離線 wheelhouse，並原子安裝到目前
+pinned version `pymobiledevice3-11.13.0` 的位置：
 
 ```text
-/Library/Application Support/iPhoneLocationMove/TunnelRuntime/current/
+/Library/Application Support/iPhoneLocationMove/TunnelRuntime/pymobiledevice3-11.13.0/
 ```
 
 ## 使用方式
@@ -310,7 +311,7 @@ sudo rm -rf "/Library/Application Support/iPhoneLocationMove"
 
 本專案以 **GPL-3.0-or-later** 授權，全文見 [`LICENSE`](LICENSE)。
 
-repo 內嵌的 `pymobiledevice3 9.36.3` 離線 wheelhouse（位於
+repo 內嵌的 `pymobiledevice3 11.13.0` 離線 wheelhouse（位於
 `iPhoneLocationMoveTunnelHelper/Resources/tunnel-wheelhouse/`）依其 package
 metadata 宣告為 `GPL-3.0-or-later`，其餘 wheel 各自保留原授權。再散布本專案
 （含原始碼或編譯後產物）時，必須同時滿足 GPL-3.0-or-later 與各內嵌元件的

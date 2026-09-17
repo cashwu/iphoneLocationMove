@@ -39,6 +39,22 @@ final class AppLifecycleTests: XCTestCase {
         )
     }
 
+    func testDeviceSessionReadyIsAFixedAcceptanceCase() {
+        let arguments = [
+            "iPhoneLocationMove",
+            "--privileged-helper-acceptance-case",
+            "device-session-ready",
+        ]
+
+        XCTAssertEqual(
+            PrivilegedHelperAcceptanceCase.parse(arguments),
+            .deviceSessionReady
+        )
+        XCTAssertTrue(
+            PrivilegedHelperAcceptanceCase.allCases.contains(.deviceSessionReady)
+        )
+    }
+
     func testPrivilegedNegativeAcceptanceCasesRequireTheirSpecificFailure() {
         XCTAssertTrue(
             PrivilegedHelperAcceptanceCase.endpointTimeout.acceptsExpectedFailure(

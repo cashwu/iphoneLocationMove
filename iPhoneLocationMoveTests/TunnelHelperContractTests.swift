@@ -115,7 +115,7 @@ private final class FakeTunnelProcess: TunnelProcessControlling {
 
 private final class FakeTunnelLauncher: TunnelProcessLaunching {
     var processFactory: () -> FakeTunnelProcess
-    private(set) var launches: [(URL, DeviceID)] = []
+    private(set) var launches: [(URL, DeviceID, UInt32)] = []
     private(set) var processes: [FakeTunnelProcess] = []
 
     init(processFactory: @escaping () -> FakeTunnelProcess = { FakeTunnelProcess(processIdentifier: 42) }) {
@@ -124,9 +124,10 @@ private final class FakeTunnelLauncher: TunnelProcessLaunching {
 
     func launch(
         runtime: InstalledTunnelRuntime,
-        deviceID: DeviceID
+        deviceID: DeviceID,
+        targetUserID: UInt32
     ) throws -> TunnelProcessControlling {
-        launches.append((runtime.executableURL, deviceID))
+        launches.append((runtime.executableURL, deviceID, targetUserID))
         let process = processFactory()
         processes.append(process)
         return process
@@ -202,7 +203,8 @@ private final class ControlledTunnelLauncher: TunnelProcessLaunching {
 
     func launch(
         runtime: InstalledTunnelRuntime,
-        deviceID: DeviceID
+        deviceID: DeviceID,
+        targetUserID: UInt32
     ) throws -> TunnelProcessControlling {
         stateLock.withLock {
             launchCountStorage += 1
@@ -337,6 +339,10 @@ private func testDeviceIdentityOwnershipAndIdempotency() throws {
     )
     try require(first == duplicate, "Idempotent start returned a different lease")
     try require(launcher.launches.count == 1, "Idempotent start launched more than one process")
+    try require(
+        launcher.launches[0].2 == fixture.identity.effectiveUserIdentifier,
+        "Verified caller UID did not reach the launcher"
+    )
     try require(verifier.verificationCount == 1, "Connection identity was reverified after accept")
     try expectError(.unknownLease) {
         _ = try manager.status(caller: fixture.identity, leaseID: TunnelLeaseID())
@@ -576,7 +582,8 @@ private func testFoundationProcessContinuouslyDrainsAndBoundsStderr() throws {
 
     let process = try FoundationTunnelProcessLauncher().launch(
         runtime: InstalledTunnelRuntime(rootURL: fixture.root, executableURL: executableURL),
-        deviceID: try DeviceID(validating: "00008110-001234567890001E")
+        deviceID: try DeviceID(validating: "00008110-001234567890001E"),
+        targetUserID: fixture.identity.effectiveUserIdentifier
     )
     _ = try process.readEndpointLine(deadline: .now() + 5)
 
@@ -616,6 +623,104 @@ private func testLaunchEnvironmentProvidesRequiredSystemTools() throws {
     try require(
         FoundationTunnelProcessLauncher.processEnvironment["PYTHONDONTWRITEBYTECODE"] == "1",
         "Tunnel process must not mutate the sealed runtime with Python bytecode caches"
+    )
+}
+
+private func testFoundationLauncherUsesNativeArgumentsAndVerifiedUID() throws {
+    let fixture = try Fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let script = """
+    #!/usr/bin/python3 -Es
+    import json
+    import os
+    import pathlib
+    import sys
+
+    pathlib.Path(__file__).with_suffix(".json").write_text(json.dumps({
+        "args": sys.argv[1:],
+        "sudo_uid": os.environ.get("SUDO_UID"),
+        "native_uid": os.environ.get("PYMOBILEDEVICE3_NATIVE_TARGET_UID"),
+    }))
+    sys.stdout.write("fd00::1 62078\\n")
+    sys.stdout.flush()
+
+    """
+    let deviceID = "00008110-001234567890001E"
+    func capture(
+        launcher: FoundationTunnelProcessLauncher,
+        executableName: String,
+        targetUserID: UInt32
+    ) throws -> [String: Any] {
+        let executableURL = fixture.root.appendingPathComponent(executableName)
+        try Data(script.utf8).write(to: executableURL)
+        guard chmod(executableURL.path, 0o700) == 0 else {
+            throw HarnessFailure.assertion("Unable to make launch fixture executable")
+        }
+
+        let process = try launcher.launch(
+            runtime: InstalledTunnelRuntime(rootURL: fixture.root, executableURL: executableURL),
+            deviceID: try DeviceID(validating: deviceID),
+            targetUserID: targetUserID
+        )
+        _ = try process.readEndpointLine(deadline: .now() + 5)
+        let deadline = Date().addingTimeInterval(5)
+        while process.isRunning, Date() < deadline {
+            usleep(10_000)
+        }
+        try require(!process.isRunning, "Launch fixture did not exit")
+
+        let captureURL = executableURL.deletingPathExtension().appendingPathExtension("json")
+        let captureData = try Data(contentsOf: captureURL)
+        guard let capture = try JSONSerialization.jsonObject(with: captureData) as? [String: Any] else {
+            throw HarnessFailure.assertion("Launch fixture output was not valid JSON")
+        }
+        return capture
+    }
+
+    let native = try capture(
+        launcher: FoundationTunnelProcessLauncher(
+            operatingSystemVersion: OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0)
+        ),
+        executableName: "capture-native",
+        targetUserID: fixture.identity.effectiveUserIdentifier
+    )
+    guard let nativeArguments = native["args"] as? [String] else {
+        throw HarnessFailure.assertion("Native launch fixture did not capture arguments")
+    }
+    try require(
+        nativeArguments == ["remote", "start-tunnel", "--native", "--script-mode", "--udid", deviceID],
+        "macOS 27 launcher did not use fixed native arguments: \(nativeArguments)"
+    )
+    try require(
+        native["native_uid"] as? String == String(fixture.identity.effectiveUserIdentifier),
+        "Native launcher did not pass the verified caller UID via PYMOBILEDEVICE3_NATIVE_TARGET_UID"
+    )
+    try require(
+        native["sudo_uid"] as? String == nil,
+        "Native launcher leaked the caller-provided SUDO_UID environment variable"
+    )
+
+    let classic = try capture(
+        launcher: FoundationTunnelProcessLauncher(
+            operatingSystemVersion: OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0)
+        ),
+        executableName: "capture-classic",
+        targetUserID: fixture.identity.effectiveUserIdentifier
+    )
+    guard let classicArguments = classic["args"] as? [String] else {
+        throw HarnessFailure.assertion("Classic launch fixture did not capture arguments")
+    }
+    try require(
+        classicArguments == ["lockdown", "start-tunnel", "--script-mode", "--udid", deviceID],
+        "macOS 13-26 launcher did not use fixed classic arguments: \(classicArguments)"
+    )
+    try require(
+        classic["sudo_uid"] as? String == nil,
+        "Classic launcher unexpectedly passed SUDO_UID"
+    )
+    try require(
+        classic["native_uid"] as? String == nil,
+        "Classic launcher unexpectedly passed native UID environment"
     )
 }
 
@@ -991,7 +1096,7 @@ private func testOfflineWheelhouseBuildsPinnedRuntime() throws {
         .appendingPathComponent(PinnedTunnelRuntimeInstaller.payloadRelativePath, isDirectory: true)
     let wheelData = Data("signed wheel bytes".utf8)
     let entry = EmbeddedPayloadFile(
-        relativePath: "pymobiledevice3-9.36.3-py3-none-any.whl",
+        relativePath: "pymobiledevice3-11.13.0-py3-none-any.whl",
         sha256: sha256(wheelData),
         mode: 0o600
     )
@@ -1004,9 +1109,24 @@ private func testOfflineWheelhouseBuildsPinnedRuntime() throws {
     )
 
     let builder = FakeOfflineRuntimeBuilder()
-    let destination = fixture.root.appendingPathComponent("wheel-runtime", isDirectory: true)
+    let runtimeParent = fixture.root.appendingPathComponent("pinned-runtime-parent", isDirectory: true)
+    let legacyURL = runtimeParent
+        .appendingPathComponent("current", isDirectory: true)
+        .appendingPathComponent("legacy-sentinel")
+    let legacyData = Data("legacy runtime must remain untouched".utf8)
+    try write(legacyData, to: legacyURL, mode: 0o640)
+    var legacyInfoBefore = stat()
+    try require(
+        lstat(legacyURL.path, &legacyInfoBefore) == 0,
+        "Unable to stat legacy runtime sentinel"
+    )
+    let legacyOwnerBefore = legacyInfoBefore.st_uid
+    let legacyModeBefore = legacyInfoBefore.st_mode & 0o777
+
+    let destination = runtimeParent
+        .appendingPathComponent(TunnelRuntimePin.directoryName, isDirectory: true)
     let plan = OfflineRuntimeBuildPlan(
-        requirement: "pymobiledevice3==9.36.3",
+        requirement: TunnelRuntimePin.requirement,
         executableRelativePath: "runtime/pymobiledevice3"
     )
     let installer = PinnedTunnelRuntimeInstaller(
@@ -1022,6 +1142,32 @@ private func testOfflineWheelhouseBuildsPinnedRuntime() throws {
 
     let runtime = try installer.prepareRuntime(for: fixture.caller)
 
+    try require(
+        TunnelRuntimePin.requirement == "pymobiledevice3==11.13.0",
+        "Tunnel runtime pin requirement drifted"
+    )
+    try require(
+        TunnelRuntimePin.directoryName == "pymobiledevice3-11.13.0",
+        "Tunnel runtime directory name drifted from its pin"
+    )
+    try require(
+        TunnelRuntimePin.productionDestinationURL.path
+            == "/Library/Application Support/iPhoneLocationMove/TunnelRuntime/\(TunnelRuntimePin.directoryName)",
+        "Production runtime destination is not the pinned application-support path"
+    )
+    try require(runtime.rootURL == destination, "Pinned runtime was not installed in its versioned directory")
+    let legacyDataAfter = try Data(contentsOf: legacyURL)
+    try require(
+        legacyDataAfter == legacyData,
+        "Installing the pinned runtime modified the legacy current sentinel"
+    )
+    var legacyInfoAfter = stat()
+    try require(
+        lstat(legacyURL.path, &legacyInfoAfter) == 0
+            && legacyInfoAfter.st_uid == legacyOwnerBefore
+            && legacyInfoAfter.st_mode & 0o777 == legacyModeBefore,
+        "Installing the pinned runtime modified legacy current metadata"
+    )
     try require(builder.plans == [plan], "Pinned runtime builder was not called exactly once")
     try require(
         runtime.executableURL.path.hasSuffix(plan.executableRelativePath),
@@ -1124,6 +1270,8 @@ private enum TunnelHelperHarness {
                 try testFoundationProcessContinuouslyDrainsAndBoundsStderr()
             case "launch-environment":
                 try testLaunchEnvironmentProvidesRequiredSystemTools()
+            case "native-launch":
+                try testFoundationLauncherUsesNativeArgumentsAndVerifiedUID()
             case "cleanup":
                 try testInvalidationAndReconcile()
             case "pending":
@@ -1249,6 +1397,10 @@ final class TunnelHelperContractTests: XCTestCase {
 
     func testLaunchEnvironmentProvidesRequiredSystemTools() throws {
         try run("launch-environment")
+    }
+
+    func testFoundationLauncherUsesNativeArgumentsAndVerifiedUID() throws {
+        try run("native-launch")
     }
 
     func testInvalidationAndReconcileReclaimOwnedProcesses() throws {

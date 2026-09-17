@@ -2,14 +2,15 @@
 id: fix-propagation-misses-one-artifact
 type: recurring-finding
 status: open
-occurrences: 3
+occurrences: 4
 first_seen: 2026-08-29
-last_seen: 2026-09-05
+last_seen: 2026-09-17
 links:
   - openspec/changes/fix-device-locked-and-favorites-layout/reviews/propose-r3.md
   - openspec/changes/fix-device-locked-and-favorites-layout/reviews/propose-r4.md
   - openspec/changes/fix-device-locked-and-favorites-layout/reviews/propose-r5.md
   - openspec/changes/auto-reconnect-after-usb-replug/reviews/propose-r2.md
+  - openspec/changes/fix-ios-27-usb-tunnel/reviews/propose-r1.md
 ---
 # 修復只傳播到部分 artifact
 
@@ -21,3 +22,4 @@ links:
 - 2026-08-29 — Round 4：改為串流優先序後 design Decisions、tasks 1.5 與 spec MODIFIED 三處仍保留舊的全域宣稱。
 - 2026-08-29 — Round 5：改回標記優先後 `proposal.md` 再次成為唯一漏掉的 artifact；殘留掃描用完整句子當 pattern 而漏抓。
 - 2026-09-05 — `auto-reconnect-after-usb-replug` — `cash-propose` Round 2：round 1 把 `reconnecting` 改為不持有 cleanup ownership時同步了 design、spec、tasks，漏掉 proposal.md Proposed Solution 一處。
+- 2026-09-17 — `fix-ios-27-usb-tunnel` — `cash-propose` Round 1：版本化 tunnel runtime 已同步到設計與文件，但漏掉硬編碼舊 `TunnelRuntime/current` 的 production timeout fixture及其 delivery scope。

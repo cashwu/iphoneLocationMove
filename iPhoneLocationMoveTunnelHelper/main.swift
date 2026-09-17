@@ -280,6 +280,17 @@ final class SecurityCallerCodeVerifier: CallerCodeVerifying {
 
 // MARK: - Pinned runtime
 
+enum TunnelRuntimePin {
+    static let requirement = "pymobiledevice3==11.13.0"
+    static let directoryName = requirement.replacingOccurrences(of: "==", with: "-")
+    static let productionParentURL = URL(
+        fileURLWithPath: "/Library/Application Support/iPhoneLocationMove/TunnelRuntime",
+        isDirectory: true
+    )
+    static let productionDestinationURL = productionParentURL
+        .appendingPathComponent(directoryName, isDirectory: true)
+}
+
 struct EmbeddedPayloadFile: Codable, Equatable, Hashable {
     let relativePath: String
     let sha256: String
@@ -475,7 +486,7 @@ struct EmbeddedDigestTable: Equatable {
             throw TunnelHelperError.runtimeUnavailable
         }
         if let buildPlan {
-            guard buildPlan.requirement == "pymobiledevice3==9.36.3",
+            guard buildPlan.requirement == TunnelRuntimePin.requirement,
                   buildPlan.executableRelativePath == "runtime/pymobiledevice3"
             else {
                 throw TunnelHelperError.runtimeUnavailable
@@ -938,7 +949,8 @@ protocol TunnelProcessControlling: AnyObject {
 protocol TunnelProcessLaunching {
     func launch(
         runtime: InstalledTunnelRuntime,
-        deviceID: DeviceID
+        deviceID: DeviceID,
+        targetUserID: UInt32
     ) throws -> TunnelProcessControlling
 }
 
@@ -1102,6 +1114,57 @@ final class FoundationTunnelProcess: TunnelProcessControlling {
     }
 }
 
+enum TunnelHostPolicy: Equatable {
+    case native
+    case classic
+
+    init(operatingSystemVersion: OperatingSystemVersion) {
+        self = operatingSystemVersion.majorVersion >= 27 ? .native : .classic
+    }
+
+    static var current: Self {
+        Self(operatingSystemVersion: ProcessInfo.processInfo.operatingSystemVersion)
+    }
+
+    func arguments(for deviceID: DeviceID) -> [String] {
+        switch self {
+        case .native:
+            return [
+                "remote",
+                "start-tunnel",
+                "--native",
+                "--script-mode",
+                "--udid",
+                deviceID.rawValue,
+            ]
+        case .classic:
+            return [
+                "lockdown",
+                "start-tunnel",
+                "--script-mode",
+                "--udid",
+                deviceID.rawValue,
+            ]
+        }
+    }
+
+    func environment(
+        base: [String: String],
+        targetUserID: UInt32
+    ) -> [String: String] {
+        var environment = base
+        environment.removeValue(forKey: "SUDO_UID")
+        environment.removeValue(forKey: "PYMOBILEDEVICE3_NATIVE_TARGET_UID")
+        switch self {
+        case .native:
+            environment["PYMOBILEDEVICE3_NATIVE_TARGET_UID"] = String(targetUserID)
+        case .classic:
+            break
+        }
+        return environment
+    }
+}
+
 final class FoundationTunnelProcessLauncher: TunnelProcessLaunching {
     static let processEnvironment = [
         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -1109,24 +1172,30 @@ final class FoundationTunnelProcessLauncher: TunnelProcessLaunching {
         "PYTHONNOUSERSITE": "1",
     ]
 
+    private let hostPolicy: TunnelHostPolicy
+
+    init(
+        operatingSystemVersion: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion
+    ) {
+        hostPolicy = TunnelHostPolicy(operatingSystemVersion: operatingSystemVersion)
+    }
+
     func launch(
         runtime: InstalledTunnelRuntime,
-        deviceID: DeviceID
+        deviceID: DeviceID,
+        targetUserID: UInt32
     ) throws -> TunnelProcessControlling {
         let process = Process()
         let output = Pipe()
         let errorOutput = Pipe()
         process.executableURL = runtime.executableURL
-        process.arguments = [
-            "lockdown",
-            "start-tunnel",
-            "--script-mode",
-            "--udid",
-            deviceID.rawValue
-        ]
+        process.arguments = hostPolicy.arguments(for: deviceID)
         process.standardOutput = output
         process.standardError = errorOutput
-        process.environment = Self.processEnvironment
+        process.environment = hostPolicy.environment(
+            base: Self.processEnvironment,
+            targetUserID: targetUserID
+        )
         do {
             try process.run()
         } catch {
@@ -1246,7 +1315,11 @@ final class TunnelLeaseManager: @unchecked Sendable {
         let process: TunnelProcessControlling
         do {
             let runtime = try runtimeProvider.prepareRuntime(for: caller)
-            process = try processLauncher.launch(runtime: runtime, deviceID: deviceID)
+            process = try processLauncher.launch(
+                runtime: runtime,
+                deviceID: deviceID,
+                targetUserID: caller.identity.effectiveUserIdentifier
+            )
         } catch let error as TunnelHelperError {
             return try finishPendingFailure(pending, error: error)
         } catch {
@@ -1767,10 +1840,7 @@ private let productionCallerPolicy: CallerTrustPolicy = {
 }()
 private let productionInstaller = PinnedTunnelRuntimeInstaller(
     digestTable: ProductionTrustAnchor.digestTable,
-    destinationURL: URL(
-        fileURLWithPath: "/Library/Application Support/iPhoneLocationMove/TunnelRuntime/current",
-        isDirectory: true
-    )
+    destinationURL: TunnelRuntimePin.productionDestinationURL
 )
 private let productionManager = TunnelLeaseManager(
     trustPolicy: productionCallerPolicy,
