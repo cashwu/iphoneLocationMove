@@ -21,7 +21,7 @@ from typing import Iterable
 from .config import ConfigError, parse_cash_config, parse_openspec_config
 
 
-BUNDLE_VERSION = "2.41.0"
+BUNDLE_VERSION = "2.42.0"
 VERSION_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 MODE_RE = re.compile(r"0[0-7]{3}\Z")
@@ -80,7 +80,14 @@ INVENTORY_ADDITIONS = (
     ("2.40.0", "runtime", ".cash-skills/lib/cash_cli/workflow.py"),
 )
 STABLE_PATHS = (".cash-skills/bin/cash", ".cash-workspace.lock")
-GUIDANCE_PATHS = ("AGENTS.md", "CLAUDE.md")
+GUIDANCE_PATH = "AGENTS.md"
+LEGACY_GUIDANCE_PATH = "CLAUDE.md"
+SHADOW_GUIDANCE_PATHS = (".claude/CLAUDE.md", "CLAUDE.local.md")
+SHADOW_GUIDANCE_WARNING = (
+    "may prevent Claude Code from loading AGENTS.md unless it imports @AGENTS.md"
+)
+MIGRATED_GUIDANCE_HEADER = b"<!-- migrated from CLAUDE.md -->\n"
+SELF_IMPORT_LINE_RE = re.compile(rb"^@AGENTS\.md(?:\r?\n|\Z)", re.MULTILINE)
 RECEIPT_PATH = ".cash-skills/receipt.tsv"
 PORTABLE_MANIFEST_PATH = ".cash-skills/manifest.tsv"
 JOURNAL_PATH = ".cash-skills/state/installer/journal.json"
@@ -538,7 +545,7 @@ def installation_inputs(
         "cash-skills.version",
         ".cash.yaml",
         LEGACY_MANIFEST_PATH,
-        *GUIDANCE_PATHS,
+        GUIDANCE_PATH,
         *(record.path for record in records),
     )
     target_paths = (
@@ -547,7 +554,8 @@ def installation_inputs(
         ".spectra.yaml",
         GITIGNORE_PATH,
         OPENSPEC_CONFIG_PATH,
-        *GUIDANCE_PATHS,
+        GUIDANCE_PATH,
+        LEGACY_GUIDANCE_PATH,
         *(record.path for record in records if record.kind != "stable"),
     )
     return snapshots(source, source_paths), snapshots(target, target_paths)
@@ -979,14 +987,31 @@ def canonical_guidance(source: Path, relative: str) -> bytes:
     return content[span[0] : span[1]]
 
 
-def render_guidance(source: Path, target: Path, relative: str) -> tuple[bytes, int, bool]:
-    canonical = canonical_guidance(source, relative)
-    existing = optional_snapshot(target, relative)
-    content = existing.content or b""
+def managed_guidance_spans(
+    content: bytes,
+    relative: str,
+) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
     cash = marker_span(content, b"CASH", relative)
     legacy = marker_span(content, b"SPECTRA", relative)
     if cash and legacy and not (cash[1] <= legacy[0] or legacy[1] <= cash[0]):
         raise InstallerError(f"nested guidance markers: {relative}")
+    return cash, legacy
+
+
+def without_managed_spans(
+    content: bytes,
+    spans: tuple[tuple[int, int] | None, tuple[int, int] | None],
+) -> bytes:
+    for begin, end in sorted((span for span in spans if span), reverse=True):
+        content = content[:begin] + content[end:]
+    return content
+
+
+def render_guidance(source: Path, target: Path, relative: str) -> tuple[bytes, int, bool]:
+    canonical = canonical_guidance(source, relative)
+    existing = optional_snapshot(target, relative)
+    content = existing.content or b""
+    cash, legacy = managed_guidance_spans(content, relative)
     spans: list[tuple[int, int, bytes]] = []
     if cash:
         spans.append((cash[0], cash[1], canonical))
@@ -1000,6 +1025,112 @@ def render_guidance(source: Path, target: Path, relative: str) -> tuple[bytes, i
         for begin, end, replacement in sorted(spans, reverse=True):
             rendered = rendered[:begin] + replacement + rendered[end:]
     return rendered, existing.mode or 0o644, rendered != content
+
+
+def shadow_guidance_present(target: Path, relative: str) -> bool:
+    """No-follow existence check for a file the installer never manages.
+
+    A symlink, dangling or not, counts as present and is only warned about;
+    the managed-boundary containment rules do not apply here.
+    """
+    try:
+        os.lstat(target / relative)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as error:
+        raise InstallerError(f"cannot inspect {relative}: {error}") from error
+    return True
+
+
+@dataclass(frozen=True)
+class LegacyGuidancePlan:
+    classification: str
+    snapshot: Snapshot
+    agents: bytes
+    delete: bool
+    ignored: tuple[str, ...] = ()
+    shadows: tuple[str, ...] = ()
+
+
+def plan_legacy_guidance(target: Path, rendered_agents: bytes) -> LegacyGuidancePlan:
+    """Classify the target CLAUDE.md that earlier installers managed.
+
+    Read-only: the returned snapshot binds the later deletion to the bytes and
+    identity the migration was computed from.
+    """
+    shadows = tuple(
+        relative
+        for relative in SHADOW_GUIDANCE_PATHS
+        if shadow_guidance_present(target, relative)
+    )
+    snapshot = optional_snapshot(target, LEGACY_GUIDANCE_PATH)
+    if not snapshot.exists:
+        return LegacyGuidancePlan("none", snapshot, rendered_agents, False, shadows=shadows)
+    content = snapshot.content or b""
+    spans = managed_guidance_spans(content, LEGACY_GUIDANCE_PATH)
+    if spans == (None, None):
+        return LegacyGuidancePlan(
+            "unmanaged", snapshot, rendered_agents, False, shadows=shadows
+        )
+    remainder = SELF_IMPORT_LINE_RE.sub(b"", without_managed_spans(content, spans))
+    if not remainder.strip(b" \t\r\n"):
+        return LegacyGuidancePlan("removed", snapshot, rendered_agents, True, shadows=shadows)
+    agents = optional_snapshot(target, GUIDANCE_PATH).content or b""
+    if remainder == without_managed_spans(
+        agents, managed_guidance_spans(agents, GUIDANCE_PATH)
+    ):
+        return LegacyGuidancePlan(
+            "deduplicated", snapshot, rendered_agents, True, shadows=shadows
+        )
+    ignored = git_excluded_paths(target, (LEGACY_GUIDANCE_PATH, GUIDANCE_PATH))
+    if ignored:
+        return LegacyGuidancePlan(
+            "ignored-conflict",
+            snapshot,
+            rendered_agents,
+            False,
+            ignored=ignored,
+            shadows=shadows,
+        )
+    if not rendered_agents:
+        separator = b""
+    elif rendered_agents.endswith(b"\n"):
+        separator = b"\n"
+    else:
+        separator = b"\n\n"
+    return LegacyGuidancePlan(
+        "merged",
+        snapshot,
+        rendered_agents + separator + MIGRATED_GUIDANCE_HEADER + remainder,
+        True,
+        shadows=shadows,
+    )
+
+
+def report_legacy_guidance(
+    target: Path,
+    plan: LegacyGuidancePlan,
+    reported: set[str],
+) -> None:
+    """Print each distinct classification and shadow warning once per run."""
+    lines: list[str] = []
+    if plan.classification != "none":
+        line = f"{target}: CLAUDE.md guidance migration: {plan.classification}"
+        if plan.classification == "unmanaged":
+            line += f"; CLAUDE.md {SHADOW_GUIDANCE_WARNING}"
+        lines.append(line)
+    lines.extend(f"{target}: {path} {SHADOW_GUIDANCE_WARNING}" for path in plan.shadows)
+    for line in lines:
+        if line not in reported:
+            reported.add(line)
+            print(line, file=sys.stderr)
+
+
+def legacy_guidance_conflict(target: Path, plan: LegacyGuidancePlan) -> str:
+    return (
+        f"{target}: CLAUDE.md guidance cannot be merged across the Git ignore "
+        f"boundary; Git-ignored: {', '.join(plan.ignored)}"
+    )
 
 
 def ensure_regular_shape(root: Path, relative: str) -> None:
@@ -1392,7 +1523,7 @@ def vendored_planned_paths(
                 PORTABLE_MANIFEST_PATH,
                 ".cash.yaml",
                 OPENSPEC_CONFIG_PATH,
-                *GUIDANCE_PATHS,
+                GUIDANCE_PATH,
                 GITIGNORE_PATH,
             )
         )
@@ -1590,12 +1721,16 @@ class InstallTransaction:
             }
         )
 
-    def add_delete(self, relative: str) -> None:
+    def add_delete(self, relative: str, *, before: Snapshot | None = None) -> None:
         self.operations.append(
             {
                 "kind": "delete",
                 "path": relative,
-                "before": optional_snapshot(self.target, relative),
+                "before": (
+                    optional_snapshot(self.target, relative)
+                    if before is None
+                    else before
+                ),
             }
         )
 
@@ -2055,9 +2190,14 @@ def install_target(
     dry_run: bool,
     force: bool,
     announce_tracking: bool = True,
+    reported_guidance: set[str] | None = None,
 ) -> str:
     if sys.version_info < (3, 11):
         raise InstallerError("Cash installer requires Python 3.11+")
+    # Migration lines are reported once per distinct line across the
+    # re-entries of one run; journal recovery re-enters before planning, so
+    # announce_tracking cannot carry this.
+    reported = set() if reported_guidance is None else reported_guidance
     if not target_input or target_input == "/" or Path(target_input).is_symlink():
         raise InstallerError("target must be a safe existing directory")
     target = Path(target_input).resolve()
@@ -2078,7 +2218,8 @@ def install_target(
         *(record.path for record in records),
         RECEIPT_PATH,
         ".cash.yaml",
-        *GUIDANCE_PATHS,
+        GUIDANCE_PATH,
+        LEGACY_GUIDANCE_PATH,
     ):
         ensure_contained(target, relative)
     hooks = test_hooks()
@@ -2142,6 +2283,7 @@ def install_target(
                 dry_run=dry_run,
                 force=force,
                 announce_tracking=False,
+                reported_guidance=reported,
             )
 
     source_config, _ = read_regular(source, ".cash.yaml", expected_mode=0o644)
@@ -2151,10 +2293,17 @@ def install_target(
         raise InstallerError(f"invalid source .cash.yaml: {error}") from error
 
     planned_config, config_changed = config_plan(source, target)
-    guidance: list[tuple[str, bytes, int, bool]] = []
-    for relative in GUIDANCE_PATHS:
-        rendered, mode, changed = render_guidance(source, target, relative)
-        guidance.append((relative, rendered, mode, changed))
+    rendered_guidance, guidance_mode, guidance_changed = render_guidance(
+        source, target, GUIDANCE_PATH
+    )
+    legacy_guidance = plan_legacy_guidance(target, rendered_guidance)
+    report_legacy_guidance(target, legacy_guidance, reported)
+    if legacy_guidance.classification == "ignored-conflict":
+        raise InstallerError(
+            legacy_guidance_conflict(target, legacy_guidance),
+            result="conflict",
+            exit_code=2,
+        )
     planned_legacy_candidates = legacy_candidates(target, legacy_records)
 
     conflicts: list[str] = []
@@ -2200,6 +2349,7 @@ def install_target(
                     dry_run=dry_run,
                     force=force,
                     announce_tracking=False,
+                    reported_guidance=reported,
                 )
             raise InstallerError(
                 "receipt-less Cash skill inventory is partial",
@@ -2227,6 +2377,7 @@ def install_target(
                 dry_run=dry_run,
                 force=force,
                 announce_tracking=False,
+                reported_guidance=reported,
             )
         raise InstallerError(
             "managed target drift: " + ", ".join(sorted(set(conflicts))),
@@ -2268,6 +2419,7 @@ def install_target(
                 dry_run=dry_run,
                 force=force,
                 announce_tracking=False,
+                reported_guidance=reported,
             )
         post_lock_receipt = optional_snapshot(target, RECEIPT_PATH)
         if (
@@ -2285,6 +2437,7 @@ def install_target(
                 dry_run=dry_run,
                 force=force,
                 announce_tracking=False,
+                reported_guidance=reported,
             )
         launcher_content = launcher_update(source, target, version)
 
@@ -2321,9 +2474,13 @@ def install_target(
                 planned_openspec_config,
                 0o644,
             )
-        for relative, rendered, mode, changed in guidance:
-            if changed:
-                transaction.add(relative, rendered, mode)
+        if guidance_changed or legacy_guidance.agents != rendered_guidance:
+            transaction.add(GUIDANCE_PATH, legacy_guidance.agents, guidance_mode)
+        if legacy_guidance.delete:
+            transaction.add_delete(
+                LEGACY_GUIDANCE_PATH,
+                before=legacy_guidance.snapshot,
+            )
         for candidate in planned_legacy_candidates:
             if candidate.get("removable"):
                 transaction.add_legacy_delete(candidate)
@@ -2385,9 +2542,11 @@ def install_vendored_target(
     force: bool,
     announce_tracking: bool = True,
     require_manifest: bool = False,
+    reported_guidance: set[str] | None = None,
 ) -> str:
     if sys.version_info < (3, 11):
         raise InstallerError("Cash installer requires Python 3.11+")
+    reported = set() if reported_guidance is None else reported_guidance
     if not target_input or target_input == "/" or Path(target_input).is_symlink():
         raise InstallerError("vendor target must be a safe existing directory")
     target = Path(target_input).resolve()
@@ -2401,7 +2560,7 @@ def install_vendored_target(
         "cash-skills.version",
         ".cash.yaml",
         LEGACY_MANIFEST_PATH,
-        *GUIDANCE_PATHS,
+        GUIDANCE_PATH,
         *(record.path for record in records),
     )
     target_watch_paths = tuple(
@@ -2411,6 +2570,7 @@ def install_vendored_target(
                 *planned_paths,
                 RECEIPT_PATH,
                 ".spectra.yaml",
+                LEGACY_GUIDANCE_PATH,
                 *(record.path for record in records),
             )
         )
@@ -2503,6 +2663,7 @@ def install_vendored_target(
                 force=force,
                 announce_tracking=False,
                 require_manifest=require_manifest,
+                reported_guidance=reported,
             )
 
     source_config, _ = read_regular(source, ".cash.yaml", expected_mode=0o644)
@@ -2511,10 +2672,14 @@ def install_vendored_target(
     except (UnicodeDecodeError, ConfigError) as error:
         raise InstallerError(f"invalid source .cash.yaml: {error}") from error
     planned_config, config_changed = config_plan(source, target)
-    guidance: list[tuple[str, bytes, int, bool]] = []
-    for relative in GUIDANCE_PATHS:
-        rendered, mode, changed = render_guidance(source, target, relative)
-        guidance.append((relative, rendered, mode, changed))
+    rendered_guidance, guidance_mode, guidance_changed = render_guidance(
+        source, target, GUIDANCE_PATH
+    )
+    legacy_guidance = plan_legacy_guidance(target, rendered_guidance)
+    report_legacy_guidance(target, legacy_guidance, reported)
+    if legacy_guidance.classification == "ignored-conflict":
+        print(legacy_guidance_conflict(target, legacy_guidance), file=sys.stderr)
+        return "conflict"
     legacy_records = legacy_manifest(source)
     planned_legacy_candidates = legacy_candidates(target, legacy_records)
 
@@ -2652,9 +2817,13 @@ def install_vendored_target(
                 planned_openspec_config,
                 0o644,
             )
-        for relative, rendered, mode, changed in guidance:
-            if changed:
-                transaction.add(relative, rendered, mode)
+        if guidance_changed or legacy_guidance.agents != rendered_guidance:
+            transaction.add(GUIDANCE_PATH, legacy_guidance.agents, guidance_mode)
+        if legacy_guidance.delete:
+            transaction.add_delete(
+                LEGACY_GUIDANCE_PATH,
+                before=legacy_guidance.snapshot,
+            )
         for candidate in planned_legacy_candidates:
             if candidate.get("removable"):
                 transaction.add_legacy_delete(candidate)
