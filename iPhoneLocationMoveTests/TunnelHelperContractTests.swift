@@ -115,7 +115,7 @@ private final class FakeTunnelProcess: TunnelProcessControlling {
 
 private final class FakeTunnelLauncher: TunnelProcessLaunching {
     var processFactory: () -> FakeTunnelProcess
-    private(set) var launches: [(URL, DeviceID, UInt32)] = []
+    private(set) var launches: [(URL, DeviceID)] = []
     private(set) var processes: [FakeTunnelProcess] = []
 
     init(processFactory: @escaping () -> FakeTunnelProcess = { FakeTunnelProcess(processIdentifier: 42) }) {
@@ -124,10 +124,9 @@ private final class FakeTunnelLauncher: TunnelProcessLaunching {
 
     func launch(
         runtime: InstalledTunnelRuntime,
-        deviceID: DeviceID,
-        targetUserID: UInt32
+        deviceID: DeviceID
     ) throws -> TunnelProcessControlling {
-        launches.append((runtime.executableURL, deviceID, targetUserID))
+        launches.append((runtime.executableURL, deviceID))
         let process = processFactory()
         processes.append(process)
         return process
@@ -203,8 +202,7 @@ private final class ControlledTunnelLauncher: TunnelProcessLaunching {
 
     func launch(
         runtime: InstalledTunnelRuntime,
-        deviceID: DeviceID,
-        targetUserID: UInt32
+        deviceID: DeviceID
     ) throws -> TunnelProcessControlling {
         stateLock.withLock {
             launchCountStorage += 1
@@ -339,10 +337,6 @@ private func testDeviceIdentityOwnershipAndIdempotency() throws {
     )
     try require(first == duplicate, "Idempotent start returned a different lease")
     try require(launcher.launches.count == 1, "Idempotent start launched more than one process")
-    try require(
-        launcher.launches[0].2 == fixture.identity.effectiveUserIdentifier,
-        "Verified caller UID did not reach the launcher"
-    )
     try require(verifier.verificationCount == 1, "Connection identity was reverified after accept")
     try expectError(.unknownLease) {
         _ = try manager.status(caller: fixture.identity, leaseID: TunnelLeaseID())
@@ -582,8 +576,7 @@ private func testFoundationProcessContinuouslyDrainsAndBoundsStderr() throws {
 
     let process = try FoundationTunnelProcessLauncher().launch(
         runtime: InstalledTunnelRuntime(rootURL: fixture.root, executableURL: executableURL),
-        deviceID: try DeviceID(validating: "00008110-001234567890001E"),
-        targetUserID: fixture.identity.effectiveUserIdentifier
+        deviceID: try DeviceID(validating: "00008110-001234567890001E")
     )
     _ = try process.readEndpointLine(deadline: .now() + 5)
 
@@ -626,7 +619,7 @@ private func testLaunchEnvironmentProvidesRequiredSystemTools() throws {
     )
 }
 
-private func testFoundationLauncherUsesNativeArgumentsAndVerifiedUID() throws {
+private func testFoundationLauncherUsesFixedClassicArguments() throws {
     let fixture = try Fixture()
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let script = """
@@ -648,8 +641,7 @@ private func testFoundationLauncherUsesNativeArgumentsAndVerifiedUID() throws {
     let deviceID = "00008110-001234567890001E"
     func capture(
         launcher: FoundationTunnelProcessLauncher,
-        executableName: String,
-        targetUserID: UInt32
+        executableName: String
     ) throws -> [String: Any] {
         let executableURL = fixture.root.appendingPathComponent(executableName)
         try Data(script.utf8).write(to: executableURL)
@@ -659,8 +651,7 @@ private func testFoundationLauncherUsesNativeArgumentsAndVerifiedUID() throws {
 
         let process = try launcher.launch(
             runtime: InstalledTunnelRuntime(rootURL: fixture.root, executableURL: executableURL),
-            deviceID: try DeviceID(validating: deviceID),
-            targetUserID: targetUserID
+            deviceID: try DeviceID(validating: deviceID)
         )
         _ = try process.readEndpointLine(deadline: .now() + 5)
         let deadline = Date().addingTimeInterval(5)
@@ -677,50 +668,24 @@ private func testFoundationLauncherUsesNativeArgumentsAndVerifiedUID() throws {
         return capture
     }
 
-    let native = try capture(
-        launcher: FoundationTunnelProcessLauncher(
-            operatingSystemVersion: OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0)
-        ),
-        executableName: "capture-native",
-        targetUserID: fixture.identity.effectiveUserIdentifier
+    let launch = try capture(
+        launcher: FoundationTunnelProcessLauncher(),
+        executableName: "capture-launch"
     )
-    guard let nativeArguments = native["args"] as? [String] else {
-        throw HarnessFailure.assertion("Native launch fixture did not capture arguments")
+    guard let arguments = launch["args"] as? [String] else {
+        throw HarnessFailure.assertion("Launch fixture did not capture arguments")
     }
     try require(
-        nativeArguments == ["remote", "start-tunnel", "--native", "--script-mode", "--udid", deviceID],
-        "macOS 27 launcher did not use fixed native arguments: \(nativeArguments)"
+        arguments == ["lockdown", "start-tunnel", "--script-mode", "--udid", deviceID],
+        "Launcher did not use fixed classic lockdown arguments: \(arguments)"
     )
     try require(
-        native["native_uid"] as? String == String(fixture.identity.effectiveUserIdentifier),
-        "Native launcher did not pass the verified caller UID via PYMOBILEDEVICE3_NATIVE_TARGET_UID"
+        launch["native_uid"] as? String == nil,
+        "Launcher passed PYMOBILEDEVICE3_NATIVE_TARGET_UID"
     )
     try require(
-        native["sudo_uid"] as? String == nil,
-        "Native launcher leaked the caller-provided SUDO_UID environment variable"
-    )
-
-    let classic = try capture(
-        launcher: FoundationTunnelProcessLauncher(
-            operatingSystemVersion: OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0)
-        ),
-        executableName: "capture-classic",
-        targetUserID: fixture.identity.effectiveUserIdentifier
-    )
-    guard let classicArguments = classic["args"] as? [String] else {
-        throw HarnessFailure.assertion("Classic launch fixture did not capture arguments")
-    }
-    try require(
-        classicArguments == ["lockdown", "start-tunnel", "--script-mode", "--udid", deviceID],
-        "macOS 13-26 launcher did not use fixed classic arguments: \(classicArguments)"
-    )
-    try require(
-        classic["sudo_uid"] as? String == nil,
-        "Classic launcher unexpectedly passed SUDO_UID"
-    )
-    try require(
-        classic["native_uid"] as? String == nil,
-        "Classic launcher unexpectedly passed native UID environment"
+        launch["sudo_uid"] as? String == nil,
+        "Launcher passed SUDO_UID"
     )
 }
 
@@ -1270,8 +1235,8 @@ private enum TunnelHelperHarness {
                 try testFoundationProcessContinuouslyDrainsAndBoundsStderr()
             case "launch-environment":
                 try testLaunchEnvironmentProvidesRequiredSystemTools()
-            case "native-launch":
-                try testFoundationLauncherUsesNativeArgumentsAndVerifiedUID()
+            case "classic-launch":
+                try testFoundationLauncherUsesFixedClassicArguments()
             case "cleanup":
                 try testInvalidationAndReconcile()
             case "pending":
@@ -1399,8 +1364,8 @@ final class TunnelHelperContractTests: XCTestCase {
         try run("launch-environment")
     }
 
-    func testFoundationLauncherUsesNativeArgumentsAndVerifiedUID() throws {
-        try run("native-launch")
+    func testFoundationLauncherUsesFixedClassicArguments() throws {
+        try run("classic-launch")
     }
 
     func testInvalidationAndReconcileReclaimOwnedProcesses() throws {

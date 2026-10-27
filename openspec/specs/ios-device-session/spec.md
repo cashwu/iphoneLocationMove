@@ -8,7 +8,7 @@ ios-device-session capability.
 
 ### Requirement: 相容的裝置支援環境
 
-系統 SHALL 在連接裝置前驗證 `pymobiledevice3` 的實際能力，至少包含 USB discovery、目前 host policy 所選 tunnel command 的必要 flags，以及 DVT simulate-location `--rsd`，且 MUST NOT 只依版本字串判定相容。macOS 27+ 的 host policy SHALL 要求 `remote start-tunnel --script-mode --native`；macOS 13–26 SHALL 保留 `lockdown start-tunnel --script-mode`。
+系統 SHALL 在連接裝置前驗證 `pymobiledevice3` 的實際能力，至少包含 USB discovery、`lockdown start-tunnel` 的 `--script-mode`，以及 DVT simulate-location `--rsd`，且 MUST NOT 只依版本字串判定相容。所有受支援 macOS SHALL 使用同一組 capability probes，MUST NOT 依 host macOS 版本改要求 `remote start-tunnel` 或 `--native`。
 
 #### Scenario: 沿用相容的既有安裝
 
@@ -49,30 +49,28 @@ ios-device-session capability.
 - **THEN** 系統 SHALL 顯示 tunnel prerequisite 指引
 - **AND** root helper MUST NOT 執行 user-writable Python
 
+#### Scenario: 只具備 native tunnel 能力的安裝不相容
+
+- **GIVEN** Mac 為 macOS 27 或更新版本
+- **AND** 既有 `pymobiledevice3` 的 `remote start-tunnel --help` 含 `--native`
+- **AND** 其 `lockdown start-tunnel --help` 未通過 exit code 0 且含 `--script-mode` 的檢查
+- **WHEN** App 準備裝置支援環境
+- **THEN** 系統 MUST NOT 將該安裝視為 ready
+
 ##### Example: 版本存在但能力不足
 
-若 macOS 27+ 的 PATH 中 `pymobiledevice3` 可輸出版號，但 `remote start-tunnel --help` 沒有 `--native` 或 `--script-mode`，系統將它視為不相容，而不是沿用。
+若 PATH 中 `pymobiledevice3` 可輸出版號，但 `lockdown start-tunnel --help` 沒有 `--script-mode`，系統將它視為不相容，而不是沿用；此判定在 macOS 13–26 與 macOS 27+ 相同。
 
 <!-- @trace
-source: fix-ios-27-usb-tunnel
-updated: 2026-09-17
+source: fix-ios-27-2-classic-tunnel
+updated: 2026-10-27
 code:
-  - iPhoneLocationMove/App/iPhoneLocationMoveApp.swift
-  - iPhoneLocationMove/Device/Resources/pymobiledevice3.lock
   - iPhoneLocationMove/Device/RuntimeManager.swift
-  - iPhoneLocationMoveTests/AppLifecycleTests.swift
   - iPhoneLocationMoveTests/RuntimeManagerTests.swift
   - iPhoneLocationMoveTests/TunnelHelperContractTests.swift
   - iPhoneLocationMoveTunnelHelper/Acceptance/PRODUCTION_ACCEPTANCE.md
-  - iPhoneLocationMoveTunnelHelper/Acceptance/cases.json
-  - iPhoneLocationMoveTunnelHelper/Acceptance/prepare-endpoint-timeout.py
-  - iPhoneLocationMoveTunnelHelper/Acceptance/run-production-acceptance.sh
-  - iPhoneLocationMoveTunnelHelper/GeneratedTunnelTrustAnchor.swift
-  - iPhoneLocationMoveTunnelHelper/Resources/tunnel-wheelhouse
-  - iPhoneLocationMoveTunnelHelper/Scripts/generate_tunnel_trust_anchor.py
-  - iPhoneLocationMoveTunnelHelper/Scripts/tests/test_generate_tunnel_trust_anchor.py
   - iPhoneLocationMoveTunnelHelper/main.swift
-  - openspec/changes/fix-ios-27-usb-tunnel/acceptance-results.md
+  - openspec/changes/fix-ios-27-2-classic-tunnel/acceptance-results.md
 tests:
 -->
 
@@ -522,33 +520,25 @@ code:
 tests:
 -->
 
-### Requirement: macOS native tunnel 相容路徑
+### Requirement: classic lockdown USB tunnel 路徑
 
-在 macOS 27+，系統 SHALL 透過受信任 helper 以 pinned `pymobiledevice3` 的 `remote start-tunnel --native --script-mode` 建立 macOS native tunnel，並 SHALL 將 verified XPC caller 的 effective UID作為 `PYMOBILEDEVICE3_NATIVE_TARGET_UID`，使 tunnel process連到該使用者的 `remotepairingd` domain。系統 MUST 只在取得有效 RSD address 與 port後繼續 DVT preparation，且 MUST NOT 在 native tunnel失敗時靜默退回 classic tunnel。macOS 13–26 MUST 保留既有 classic tunnel policy，避免本修復改變原支援矩陣的 transport contract。
+在所有受支援 macOS，系統 SHALL 透過受信任 helper 以 pinned `pymobiledevice3` 執行固定的 `lockdown start-tunnel --script-mode --udid <deviceID>` 建立 USB tunnel，MUST NOT 執行 `remote start-tunnel` 或 `--native`，且 MUST NOT 設定 `PYMOBILEDEVICE3_NATIVE_TARGET_UID`。系統 MUST 只在取得有效 RSD address 與 port 後繼續 DVT preparation，且 MUST NOT 在 tunnel 失敗時切換到其他 transport。
 
-#### Scenario: macOS 27 連接 iOS 27 USB iPhone
+#### Scenario: macOS 27.2 連接 iOS 27.2 USB iPhone
 
-- **GIVEN** Mac 為 macOS 27
-- **AND** selected USB iPhone 為 iOS 27、已信任、Developer Mode 與 DDI 已就緒
+- **GIVEN** Mac 為 macOS 27.2
+- **AND** selected USB iPhone 為 iOS 27.2、已信任、Developer Mode 與 DDI 已就緒
 - **WHEN** App 準備 device session
-- **THEN** helper SHALL 以 pinned native tunnel取得有效 RSD address 與 port
-- **AND** App SHALL 繼續 DVT preparation並在 DVT ready後發布 ready session
+- **THEN** helper SHALL 以 `lockdown start-tunnel --script-mode --udid <deviceID>` 取得有效 RSD address 與 port
+- **AND** App SHALL 繼續 DVT preparation 並在 DVT ready 後發布 ready session
 
-#### Scenario: 較早的受支援 macOS 維持既有 transport
+#### Scenario: 所有受支援 macOS 使用相同 tunnel command
 
-- **GIVEN** Mac 為 macOS 13–26
-- **WHEN** App 準備 iOS 17+ device session
-- **THEN** helper SHALL 使用既有 `lockdown start-tunnel --script-mode --udid <deviceID>` policy
-- **AND** helper MUST NOT 設定 `PYMOBILEDEVICE3_NATIVE_TARGET_UID`
-- **AND** pinned runtime upgrade MUST NOT 將較早 host 靜默切換到 native command
-
-#### Scenario: helper 連到 verified caller 的 user domain
-
-- **GIVEN** helper 運行於 system launchd domain
-- **AND** XPC caller 已通過 code-signature verification
-- **WHEN** helper 為該 caller 啟動 native tunnel
-- **THEN** tunnel process 的 `PYMOBILEDEVICE3_NATIVE_TARGET_UID` SHALL 等於 verified caller 的 effective UID
-- **AND** caller MUST NOT 透過 request指定或覆寫該 UID、command、arguments 或 environment
+- **GIVEN** Mac 為 macOS 13–26 或 macOS 27+
+- **WHEN** helper 為 verified caller 啟動 tunnel
+- **THEN** tunnel process arguments SHALL 等於 `lockdown start-tunnel --script-mode --udid <validated-device-id>`
+- **AND** tunnel process environment MUST NOT 含 `PYMOBILEDEVICE3_NATIVE_TARGET_UID` 或 `SUDO_UID`
+- **AND** caller MUST NOT 透過 request 指定或覆寫 command、arguments 或 environment
 
 #### Scenario: 升級時存在舊版 sealed runtime
 
@@ -556,35 +546,25 @@ tests:
 - **WHEN** 新 helper 第一次建立 tunnel
 - **THEN** helper SHALL 安裝並執行目前 pinned version 的獨立 root-owned sealed runtime
 - **AND** helper MUST NOT 執行、覆寫或信任舊版 runtime
-- **AND** 舊版 runtime 的存在 MUST NOT 使目前 pinned runtime被誤判為遭竄改
+- **AND** 舊版 runtime 的存在 MUST NOT 使目前 pinned runtime 被誤判為遭竄改
 - **AND** helper MUST NOT 刪除或修改舊版 runtime 的內容或 metadata
 
-#### Scenario: native tunnel 在 endpoint 前失敗
+#### Scenario: tunnel 在 endpoint 前失敗
 
-- **WHEN** native tunnel process 在輸出有效 RSD endpoint 前退出、逾時或無法連到 target user domain
-- **THEN** 系統 SHALL 保持 device session non-ready並回傳 tunnel failure
-- **AND** helper SHALL 依既有 pending ownership規則停止並回收該 process
-- **AND** 系統 MUST NOT fallback 到 classic `lockdown start-tunnel`
+- **WHEN** tunnel process 在輸出有效 RSD endpoint 前退出或逾時
+- **THEN** 系統 SHALL 保持 device session non-ready 並回傳 tunnel failure
+- **AND** helper SHALL 依既有 pending ownership 規則停止並回收該 process
+- **AND** 系統 MUST NOT fallback 到 `remote start-tunnel` 或 native tunnel
 
 <!-- @trace
-source: fix-ios-27-usb-tunnel
-updated: 2026-09-17
+source: fix-ios-27-2-classic-tunnel
+updated: 2026-10-27
 code:
-  - iPhoneLocationMove/App/iPhoneLocationMoveApp.swift
-  - iPhoneLocationMove/Device/Resources/pymobiledevice3.lock
   - iPhoneLocationMove/Device/RuntimeManager.swift
-  - iPhoneLocationMoveTests/AppLifecycleTests.swift
   - iPhoneLocationMoveTests/RuntimeManagerTests.swift
   - iPhoneLocationMoveTests/TunnelHelperContractTests.swift
   - iPhoneLocationMoveTunnelHelper/Acceptance/PRODUCTION_ACCEPTANCE.md
-  - iPhoneLocationMoveTunnelHelper/Acceptance/cases.json
-  - iPhoneLocationMoveTunnelHelper/Acceptance/prepare-endpoint-timeout.py
-  - iPhoneLocationMoveTunnelHelper/Acceptance/run-production-acceptance.sh
-  - iPhoneLocationMoveTunnelHelper/GeneratedTunnelTrustAnchor.swift
-  - iPhoneLocationMoveTunnelHelper/Resources/tunnel-wheelhouse
-  - iPhoneLocationMoveTunnelHelper/Scripts/generate_tunnel_trust_anchor.py
-  - iPhoneLocationMoveTunnelHelper/Scripts/tests/test_generate_tunnel_trust_anchor.py
   - iPhoneLocationMoveTunnelHelper/main.swift
-  - openspec/changes/fix-ios-27-usb-tunnel/acceptance-results.md
+  - openspec/changes/fix-ios-27-2-classic-tunnel/acceptance-results.md
 tests:
 -->

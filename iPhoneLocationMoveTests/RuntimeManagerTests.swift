@@ -3,7 +3,7 @@ import XCTest
 @testable import iPhoneLocationMove
 
 final class RuntimeManagerTests: XCTestCase {
-    func testCompatibleExistingInstallationUsesHostPolicyCapabilityProbesWithoutCreatingVenv() async throws {
+    func testCompatibleExistingInstallationUsesLockdownTunnelProbeWithoutCreatingVenv() async throws {
         let harness = try RuntimeHarness()
         let executable = URL(fileURLWithPath: "/tools/pymobiledevice3")
         let runner = FakeRuntimeProcessRunner(stubs: .compatibleRuntime)
@@ -21,7 +21,7 @@ final class RuntimeManagerTests: XCTestCase {
         let commands = await runner.commands
         XCTAssertEqual(commands.map(\.arguments), [
             ["usbmux", "list", "--help"],
-            ["remote", "start-tunnel", "--help"],
+            ["lockdown", "start-tunnel", "--help"],
             ["developer", "dvt", "simulate-location", "set", "--help"],
         ])
         XCTAssertFalse(commands.contains { $0.arguments.contains("venv") })
@@ -73,13 +73,13 @@ final class RuntimeManagerTests: XCTestCase {
         XCTAssertEqual(commands.last?.arguments, ["--version"])
     }
 
-    func testMacOS27RejectsClassicOnlyTunnelCapability() async throws {
+    func testNativeOnlyTunnelCapabilityIsNotCompatible() async throws {
         let harness = try RuntimeHarness()
         let executable = URL(fileURLWithPath: "/tools/pymobiledevice3")
         let python = URL(fileURLWithPath: "/usr/bin/python3")
         let runner = FakeRuntimeProcessRunner(stubs: [
             .success(stdout: "[]"),
-            .success(stdout: "Options: --script-mode"),
+            .success(stdout: "Usage: lockdown start-tunnel; Options: --udid"),
             .success(stderr: "Python 3.11.9"),
         ])
         let manager = RuntimeManager(
@@ -93,34 +93,8 @@ final class RuntimeManagerTests: XCTestCase {
         let commands = await runner.commands
         XCTAssertEqual(commands.map(\.arguments), [
             ["usbmux", "list", "--help"],
-            ["remote", "start-tunnel", "--help"],
-            ["--version"],
-        ])
-    }
-
-    func testMacOS13Through26KeepsClassicTunnelCapability() async throws {
-        let harness = try RuntimeHarness()
-        let executable = URL(fileURLWithPath: "/tools/pymobiledevice3")
-        let runner = FakeRuntimeProcessRunner(stubs: .classicCompatibleRuntime)
-        let manager = RuntimeManager(
-            configuration: harness.configuration(
-                existing: [executable],
-                hostOperatingSystemVersion: RuntimeHarness.macOS26
-            ),
-            processRunner: runner
-        )
-
-        let availability = await manager.inspect()
-
-        XCTAssertEqual(
-            availability,
-            .ready(RuntimeInstallation(executableURL: executable, source: .existing))
-        )
-        let commands = await runner.commands
-        XCTAssertEqual(commands.map(\.arguments), [
-            ["usbmux", "list", "--help"],
             ["lockdown", "start-tunnel", "--help"],
-            ["developer", "dvt", "simulate-location", "set", "--help"],
+            ["--version"],
         ])
     }
 
@@ -130,7 +104,7 @@ final class RuntimeManagerTests: XCTestCase {
         let python = URL(fileURLWithPath: "/usr/bin/python3")
         let runner = FakeRuntimeProcessRunner(stubs: [
             .success(stdout: "[]"),
-            .success(stdout: "Options: --native --script-mode"),
+            .success(stdout: "Options: --script-mode"),
             .success(stdout: "Usage: simulate-location set"),
             .success(stderr: "Python 3.11.9"),
         ])
@@ -355,17 +329,6 @@ final class RuntimeManagerTests: XCTestCase {
 
 private struct RuntimeHarness {
     static let pinnedRequirement = "pymobiledevice3==11.13.0"
-    static let macOS26 = OperatingSystemVersion(
-        majorVersion: 26,
-        minorVersion: 0,
-        patchVersion: 0
-    )
-    static let macOS27 = OperatingSystemVersion(
-        majorVersion: 27,
-        minorVersion: 0,
-        patchVersion: 0
-    )
-
     let root: URL
     let manifestURL: URL
 
@@ -379,15 +342,13 @@ private struct RuntimeHarness {
 
     func configuration(
         existing: [URL] = [],
-        python: [URL] = [],
-        hostOperatingSystemVersion: OperatingSystemVersion = RuntimeHarness.macOS27
+        python: [URL] = []
     ) -> RuntimeManager.Configuration {
         RuntimeManager.Configuration(
             applicationSupportDirectory: root.appendingPathComponent("Application Support"),
             existingExecutableURLs: existing,
             pythonExecutableURLs: python,
-            lockManifestURL: manifestURL,
-            hostOperatingSystemVersion: hostOperatingSystemVersion
+            lockManifestURL: manifestURL
         )
     }
 }
@@ -469,14 +430,6 @@ private actor FakeRuntimeProcessRunner: RuntimeProcessRunning {
 
 private extension Array where Element == FakeRuntimeProcessRunner.Stub {
     static var compatibleRuntime: Self {
-        [
-            .success(stdout: "[]"),
-            .success(stdout: "Options: --native --script-mode"),
-            .success(stdout: "Usage: simulate-location set; Options: --rsd"),
-        ]
-    }
-
-    static var classicCompatibleRuntime: Self {
         [
             .success(stdout: "[]"),
             .success(stdout: "Options: --script-mode"),

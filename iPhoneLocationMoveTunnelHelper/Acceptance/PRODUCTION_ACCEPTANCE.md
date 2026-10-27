@@ -65,7 +65,7 @@ USB discovery、trust、Developer Mode、DDI、pinned tunnel 與 DVT，確認
 `<case>-after.txt`：
 
 ```sh
-pgrep -alf 'iPhoneLocationMoveTunnelHelper|pymobiledevice3.*remote.*tunnel|TunnelRuntime' || true
+pgrep -alf 'iPhoneLocationMoveTunnelHelper|pymobiledevice3.*start-tunnel|TunnelRuntime' || true
 sudo launchctl print system/com.cash.iPhoneLocationMoveTunnelHelper
 sudo find '/Library/Application Support/iPhoneLocationMove/TunnelRuntime/pymobiledevice3-11.13.0' \
   -xdev -print0 | sudo xargs -0 stat -f '%Su:%Sg %Mp%Lp %N'
@@ -180,7 +180,7 @@ test ! -e /Library/PrivilegedHelperTools/com.cash.iPhoneLocationMoveTunnelHelper
 test ! -e /Library/LaunchDaemons/com.cash.iPhoneLocationMoveTunnelHelper.plist
 test ! -e '/Library/Application Support/iPhoneLocationMove/TunnelRuntime'
 sudo launchctl print system/com.cash.iPhoneLocationMoveTunnelHelper
-pgrep -alf 'iPhoneLocationMoveTunnelHelper|pymobiledevice3.*remote.*tunnel|TunnelRuntime'
+pgrep -alf 'iPhoneLocationMoveTunnelHelper|pymobiledevice3.*start-tunnel|TunnelRuntime'
 ```
 
 最後兩個查詢預期找不到 service／process。將所有 JSON、snapshot、signature、

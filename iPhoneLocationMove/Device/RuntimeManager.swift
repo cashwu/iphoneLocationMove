@@ -79,36 +79,6 @@ actor RuntimeManager {
         let existingExecutableURLs: [URL]
         let pythonExecutableURLs: [URL]
         let lockManifestURL: URL
-        let hostOperatingSystemVersion: OperatingSystemVersion
-
-        init(
-            applicationSupportDirectory: URL,
-            existingExecutableURLs: [URL],
-            pythonExecutableURLs: [URL],
-            lockManifestURL: URL,
-            hostOperatingSystemVersion: OperatingSystemVersion = ProcessInfo
-                .processInfo
-                .operatingSystemVersion
-        ) {
-            self.applicationSupportDirectory = applicationSupportDirectory
-            self.existingExecutableURLs = existingExecutableURLs
-            self.pythonExecutableURLs = pythonExecutableURLs
-            self.lockManifestURL = lockManifestURL
-            self.hostOperatingSystemVersion = hostOperatingSystemVersion
-        }
-
-        static func == (lhs: Self, rhs: Self) -> Bool {
-            lhs.applicationSupportDirectory == rhs.applicationSupportDirectory
-                && lhs.existingExecutableURLs == rhs.existingExecutableURLs
-                && lhs.pythonExecutableURLs == rhs.pythonExecutableURLs
-                && lhs.lockManifestURL == rhs.lockManifestURL
-                && lhs.hostOperatingSystemVersion.majorVersion
-                    == rhs.hostOperatingSystemVersion.majorVersion
-                && lhs.hostOperatingSystemVersion.minorVersion
-                    == rhs.hostOperatingSystemVersion.minorVersion
-                && lhs.hostOperatingSystemVersion.patchVersion
-                    == rhs.hostOperatingSystemVersion.patchVersion
-        }
 
         var managedEnvironmentURL: URL {
             applicationSupportDirectory.appendingPathComponent("pymobiledevice3-venv")
@@ -151,8 +121,7 @@ actor RuntimeManager {
                         "/usr/local/bin/python3",
                     ]
                 ),
-                lockManifestURL: lockManifestURL,
-                hostOperatingSystemVersion: processInfo.operatingSystemVersion
+                lockManifestURL: lockManifestURL
             )
         }
 
@@ -278,17 +247,13 @@ actor RuntimeManager {
     private func hasRequiredCapabilities(executableURL: URL) async -> Bool {
         await Self.hasRequiredCapabilities(
             executableURL: executableURL,
-            processRunner: processRunner,
-            hostOperatingSystemVersion: configuration.hostOperatingSystemVersion
+            processRunner: processRunner
         )
     }
 
     fileprivate static func hasRequiredCapabilities(
         executableURL: URL,
-        processRunner: any RuntimeProcessRunning,
-        hostOperatingSystemVersion: OperatingSystemVersion = ProcessInfo
-            .processInfo
-            .operatingSystemVersion
+        processRunner: any RuntimeProcessRunning
     ) async -> Bool {
         do {
             let usbDiscovery = try await processRunner.run(
@@ -301,26 +266,15 @@ actor RuntimeManager {
                 return false
             }
 
-            let tunnelProbeArguments: [String]
-            let requiredTunnelFlags: [String]
-            if hostOperatingSystemVersion.majorVersion >= 27 {
-                tunnelProbeArguments = ["remote", "start-tunnel", "--help"]
-                requiredTunnelFlags = ["--native", "--script-mode"]
-            } else {
-                tunnelProbeArguments = ["lockdown", "start-tunnel", "--help"]
-                requiredTunnelFlags = ["--script-mode"]
-            }
             let tunnelHelp = try await processRunner.run(
                 RuntimeProcessCommand(
                     executableURL: executableURL,
-                    arguments: tunnelProbeArguments
+                    arguments: ["lockdown", "start-tunnel", "--help"]
                 )
             )
             guard
                 tunnelHelp.exitCode == 0,
-                requiredTunnelFlags.allSatisfy({ flag in
-                    tunnelHelp.combinedOutput.contains(flag)
-                })
+                tunnelHelp.combinedOutput.contains("--script-mode")
             else {
                 return false
             }
@@ -502,8 +456,7 @@ private struct RuntimeInstaller: Sendable {
             progress(.verifyingCapabilities)
             guard await RuntimeManager.hasRequiredCapabilities(
                 executableURL: stagingRuntimeURL,
-                processRunner: processRunner,
-                hostOperatingSystemVersion: configuration.hostOperatingSystemVersion
+                processRunner: processRunner
             ) else {
                 try Task.checkCancellation()
                 throw RuntimeManagerFailure.commandFailed(
@@ -573,8 +526,7 @@ private struct RuntimeInstaller: Sendable {
         for executableURL in configuration.existingExecutableURLs {
             if await RuntimeManager.hasRequiredCapabilities(
                 executableURL: executableURL,
-                processRunner: processRunner,
-                hostOperatingSystemVersion: configuration.hostOperatingSystemVersion
+                processRunner: processRunner
             ) {
                 return RuntimeInstallation(executableURL: executableURL, source: .existing)
             }
@@ -597,8 +549,7 @@ private struct RuntimeInstaller: Sendable {
         )
         guard await RuntimeManager.hasRequiredCapabilities(
             executableURL: executableURL,
-            processRunner: processRunner,
-            hostOperatingSystemVersion: configuration.hostOperatingSystemVersion
+            processRunner: processRunner
         ) else {
             return nil
         }

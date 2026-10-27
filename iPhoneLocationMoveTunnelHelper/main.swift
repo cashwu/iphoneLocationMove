@@ -949,8 +949,7 @@ protocol TunnelProcessControlling: AnyObject {
 protocol TunnelProcessLaunching {
     func launch(
         runtime: InstalledTunnelRuntime,
-        deviceID: DeviceID,
-        targetUserID: UInt32
+        deviceID: DeviceID
     ) throws -> TunnelProcessControlling
 }
 
@@ -1114,57 +1113,6 @@ final class FoundationTunnelProcess: TunnelProcessControlling {
     }
 }
 
-enum TunnelHostPolicy: Equatable {
-    case native
-    case classic
-
-    init(operatingSystemVersion: OperatingSystemVersion) {
-        self = operatingSystemVersion.majorVersion >= 27 ? .native : .classic
-    }
-
-    static var current: Self {
-        Self(operatingSystemVersion: ProcessInfo.processInfo.operatingSystemVersion)
-    }
-
-    func arguments(for deviceID: DeviceID) -> [String] {
-        switch self {
-        case .native:
-            return [
-                "remote",
-                "start-tunnel",
-                "--native",
-                "--script-mode",
-                "--udid",
-                deviceID.rawValue,
-            ]
-        case .classic:
-            return [
-                "lockdown",
-                "start-tunnel",
-                "--script-mode",
-                "--udid",
-                deviceID.rawValue,
-            ]
-        }
-    }
-
-    func environment(
-        base: [String: String],
-        targetUserID: UInt32
-    ) -> [String: String] {
-        var environment = base
-        environment.removeValue(forKey: "SUDO_UID")
-        environment.removeValue(forKey: "PYMOBILEDEVICE3_NATIVE_TARGET_UID")
-        switch self {
-        case .native:
-            environment["PYMOBILEDEVICE3_NATIVE_TARGET_UID"] = String(targetUserID)
-        case .classic:
-            break
-        }
-        return environment
-    }
-}
-
 final class FoundationTunnelProcessLauncher: TunnelProcessLaunching {
     static let processEnvironment = [
         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -1172,30 +1120,24 @@ final class FoundationTunnelProcessLauncher: TunnelProcessLaunching {
         "PYTHONNOUSERSITE": "1",
     ]
 
-    private let hostPolicy: TunnelHostPolicy
-
-    init(
-        operatingSystemVersion: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion
-    ) {
-        hostPolicy = TunnelHostPolicy(operatingSystemVersion: operatingSystemVersion)
-    }
-
     func launch(
         runtime: InstalledTunnelRuntime,
-        deviceID: DeviceID,
-        targetUserID: UInt32
+        deviceID: DeviceID
     ) throws -> TunnelProcessControlling {
         let process = Process()
         let output = Pipe()
         let errorOutput = Pipe()
         process.executableURL = runtime.executableURL
-        process.arguments = hostPolicy.arguments(for: deviceID)
+        process.arguments = [
+            "lockdown",
+            "start-tunnel",
+            "--script-mode",
+            "--udid",
+            deviceID.rawValue
+        ]
         process.standardOutput = output
         process.standardError = errorOutput
-        process.environment = hostPolicy.environment(
-            base: Self.processEnvironment,
-            targetUserID: targetUserID
-        )
+        process.environment = Self.processEnvironment
         do {
             try process.run()
         } catch {
@@ -1317,8 +1259,7 @@ final class TunnelLeaseManager: @unchecked Sendable {
             let runtime = try runtimeProvider.prepareRuntime(for: caller)
             process = try processLauncher.launch(
                 runtime: runtime,
-                deviceID: deviceID,
-                targetUserID: caller.identity.effectiveUserIdentifier
+                deviceID: deviceID
             )
         } catch let error as TunnelHelperError {
             return try finishPendingFailure(pending, error: error)
